@@ -4,7 +4,21 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const app = express();
 app.use(express.json());
+const BRIDGE_TOKEN = process.env.DEVELOPER_BRIDGE_TOKEN;
 
+app.use((req, res, next) => {
+  if (req.path === "/health") return next();
+
+  const auth = req.headers.authorization || "";
+  if (!BRIDGE_TOKEN || auth !== `Bearer ${BRIDGE_TOKEN}`) {
+    return res.status(401).json({
+      success: false,
+      error: "Unauthorized"
+    });
+  }
+
+  next();
+});
 async function callTool(name, args) {
   const transport = new StdioClientTransport({
     command: "node",

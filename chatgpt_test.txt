@@ -1,0 +1,1 @@
+ChatGPT local MCP connection successful.
