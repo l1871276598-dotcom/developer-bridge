@@ -14,7 +14,7 @@ test("package scripts expose the HTTP default, stdio alternative, and complete t
   assert.deepEqual(manifest.scripts, {
     start: "node mcp-http.js",
     "start:stdio": "node server.js",
-    test: "node --test",
+    test: "node --test test/*.test.js",
   });
 });
 
@@ -72,6 +72,9 @@ test("README documents the supported setup, connection, tools, and safety bounda
     /list_files/u,
     /read_file/u,
     /write_file/u,
+    /git_status/u,
+    /git_diff/u,
+    /run_tests/u,
     /(?:no|无)[^\n]*(?:delete|删除)/iu,
     /(?:no|无)[^\n]*(?:arbitrary shell|任意 Shell)/iu,
     /(?:no|无)[^\n]*(?:automatic commit|自动 commit)/iu,

@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node mcp-http.js",
     "start:stdio": "node server.js",
-    "test": "node --test"
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

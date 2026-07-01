@@ -63,6 +63,9 @@ The stdio service requires `DEVELOPER_BRIDGE_WORKSPACE` but does not use `MCP_PA
 - `list_files`: list a directory inside the workspace.
 - `read_file`: read a UTF-8 text file inside the workspace.
 - `write_file`: write a protected UTF-8 text file inside the workspace.
+- `git_status`: run the fixed read-only `git status --short` check.
+- `git_diff`: show the fixed unstaged diff, or the staged diff with `staged=true`.
+- `run_tests`: run only the server-approved `npm test` mapping with bounded output and timeout.
 
 ## Safety boundary
 

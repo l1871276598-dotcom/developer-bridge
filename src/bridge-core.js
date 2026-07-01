@@ -1,8 +1,25 @@
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import os from "node:os";
 import path from "node:path";
 
 export const MAX_FILE_BYTES = 1024 * 1024;
+export const MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
+export const RUN_TESTS_TIMEOUT_MS = 120 * 1000;
+
+const GIT_TIMEOUT_MS = 30 * 1000;
+const TERMINATION_GRACE_MS = 2 * 1000;
+const TEST_SUPERVISOR_PATH = fileURLToPath(new URL("./test-supervisor.js", import.meta.url));
+const SAFE_GIT_ENV = Object.freeze({
+  GIT_OPTIONAL_LOCKS: "0",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: os.devNull,
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_KEY_0: "core.fsmonitor",
+  GIT_CONFIG_VALUE_0: "false",
+});
 
 const WRITE_DENYLIST = Object.freeze({
   directorySegments: new Set([".git", "node_modules"]),
@@ -45,6 +62,41 @@ const TOOL_DEFINITIONS = Object.freeze([
       additionalProperties: false,
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  },
+  {
+    name: "git_status",
+    description: "Return the short Git status of the authorized local workspace.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "git_diff",
+    description: "Return the unstaged or staged Git diff of the authorized local workspace.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        staged: { type: "boolean", description: "When true, return the staged diff." },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "run_tests",
+    description: "Run the pre-approved default test suite in the authorized local workspace.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        test: { type: "string", enum: ["default"] },
+      },
+      required: ["test"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false },
   },
 ]);
 
@@ -111,7 +163,129 @@ function displayPath(value) {
   return JSON.stringify(String(value)).slice(1, -1).replace(/=/g, "%3D").replace(/ /g, "%20");
 }
 
-export async function createBridgeCore(workspace, logger = (line) => console.error(line)) {
+function appendBounded(chunks, chunk, state, limit) {
+  const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+  const remaining = Math.max(0, limit - state.bytes);
+  if (remaining > 0) chunks.push(buffer.subarray(0, remaining));
+  state.bytes += buffer.length;
+  return state.bytes > limit;
+}
+
+function decodeBoundedUtf8(chunks, limit) {
+  const text = Buffer.concat(chunks).toString("utf8");
+  if (Buffer.byteLength(text, "utf8") <= limit) return text;
+  const encoded = Buffer.from(text, "utf8");
+  return encoded.subarray(0, Math.max(0, limit - 3)).toString("utf8");
+}
+
+function runFixedProcess(command, args, {
+  cwd,
+  timeoutMs,
+  stdoutLimit = MAX_COMMAND_OUTPUT_BYTES,
+  stderrLimit = MAX_COMMAND_OUTPUT_BYTES,
+  detached = false,
+  terminationGraceMs = TERMINATION_GRACE_MS,
+  envOverrides = {},
+}) {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env, ...envOverrides };
+    delete env.NODE_TEST_CONTEXT;
+    const child = spawn(command, args, {
+      cwd,
+      env,
+      shell: false,
+      detached,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    const stdoutState = { bytes: 0 };
+    const stderrState = { bytes: 0 };
+    let timedOut = false;
+    let outputLimitExceeded = false;
+    let terminationStarted = false;
+    let forcedTermination;
+    let closedResult;
+    let settled = false;
+
+    const finish = () => {
+      if (settled || !closedResult) return;
+      settled = true;
+      resolve({
+        ...closedResult,
+        stdout: decodeBoundedUtf8(stdoutChunks, stdoutLimit),
+        stderr: decodeBoundedUtf8(stderrChunks, stderrLimit),
+        timedOut,
+        outputLimitExceeded,
+      });
+    };
+
+    const signalProcess = (signal) => {
+      try {
+        if (detached && child.pid) process.kill(-child.pid, signal);
+        else if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+      } catch (error) {
+        if (error?.code !== "ESRCH") throw error;
+      }
+    };
+    const startTermination = () => {
+      if (terminationStarted) return;
+      terminationStarted = true;
+      signalProcess("SIGTERM");
+      forcedTermination = setTimeout(() => {
+        signalProcess("SIGKILL");
+        forcedTermination = undefined;
+        finish();
+      }, terminationGraceMs);
+      forcedTermination.unref();
+    };
+
+    const stopForLimit = () => {
+      if (outputLimitExceeded) return;
+      outputLimitExceeded = true;
+      startTermination();
+    };
+    child.stdout.on("data", (chunk) => {
+      if (appendBounded(stdoutChunks, chunk, stdoutState, stdoutLimit)) stopForLimit();
+    });
+    child.stderr.on("data", (chunk) => {
+      if (appendBounded(stderrChunks, chunk, stderrState, stderrLimit)) stopForLimit();
+    });
+    child.once("error", reject);
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      startTermination();
+    }, timeoutMs);
+    timeout.unref();
+    child.once("close", (exitCode, signal) => {
+      clearTimeout(timeout);
+      closedResult = { exitCode, signal };
+      if (!detached || !terminationStarted) {
+        clearTimeout(forcedTermination);
+        forcedTermination = undefined;
+        finish();
+        return;
+      }
+      try {
+        process.kill(-child.pid, 0);
+        if (forcedTermination === undefined) finish();
+      } catch (error) {
+        if (error?.code !== "ESRCH") {
+          clearTimeout(forcedTermination);
+          forcedTermination = undefined;
+          settled = true;
+          reject(error);
+          return;
+        }
+        clearTimeout(forcedTermination);
+        forcedTermination = undefined;
+        finish();
+      }
+    });
+  });
+}
+
+export async function createBridgeCore(workspace, logger = (line) => console.error(line), options = {}) {
   if (typeof workspace !== "string" || workspace.length === 0) {
     throw new Error("DEVELOPER_BRIDGE_WORKSPACE is required; set it to the authorized project directory");
   }
@@ -123,6 +297,33 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
     if (!rootStat.isDirectory()) throw new Error("not-directory");
   } catch {
     throw new Error("DEVELOPER_BRIDGE_WORKSPACE must identify an existing directory");
+  }
+
+  const testTimeoutMs = options.testTimeoutMs ?? RUN_TESTS_TIMEOUT_MS;
+  const terminationGraceMs = options.terminationGraceMs ?? TERMINATION_GRACE_MS;
+  if (!Number.isInteger(testTimeoutMs) || testTimeoutMs <= 0) throw new Error("Test timeout must be a positive integer");
+  if (!Number.isInteger(terminationGraceMs) || terminationGraceMs < 0) throw new Error("Termination grace must be a non-negative integer");
+
+  async function runGit(args) {
+    let result;
+    try {
+      result = await runFixedProcess("git", args, {
+        cwd: root,
+        timeoutMs: GIT_TIMEOUT_MS,
+        envOverrides: SAFE_GIT_ENV,
+      });
+    } catch {
+      throw new ToolError("Git could not be started");
+    }
+    if (result.outputLimitExceeded) {
+      throw new ToolError("Git output size limit exceeded; narrow the workspace changes before retrying");
+    }
+    if (result.timedOut) throw new ToolError("Git operation timed out");
+    if (result.exitCode !== 0) {
+      if (/not a git repository/iu.test(result.stderr)) throw new ToolError("Authorized workspace is not a Git repository");
+      throw new ToolError("Git operation failed");
+    }
+    return result.stdout;
   }
 
   function lexicalTarget(relativePath) {
@@ -261,6 +462,38 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
       const { target, expectedStat, exists } = await writableTarget(relativePath);
       await writeFileVerified(target, expectedStat, exists, args.content);
       return { relativePath, text: `Wrote ${relativePath} (${contentBytes} bytes)`, contentBytes };
+    }
+    if (name === "git_status") {
+      assertPlainArguments(args, []);
+      const output = await runGit(["status", "--short"]);
+      return { text: output.length === 0 ? "clean" : output };
+    }
+    if (name === "git_diff") {
+      assertPlainArguments(args, ["staged"]);
+      if ("staged" in args && typeof args.staged !== "boolean") {
+        throw new ToolError("staged must be a boolean");
+      }
+      const gitArgs = args.staged === true
+        ? ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color"]
+        : ["diff", "--no-ext-diff", "--no-textconv", "--no-color"];
+      const output = await runGit(gitArgs);
+      return { text: output.length === 0 ? "no diff" : output };
+    }
+    if (name === "run_tests") {
+      assertPlainArguments(args, ["test"], ["test"]);
+      if (args.test !== "default") throw new ToolError('test must be exactly "default"');
+      let result;
+      try {
+        result = await runFixedProcess(process.execPath, [TEST_SUPERVISOR_PATH], {
+          cwd: root,
+          timeoutMs: testTimeoutMs,
+          detached: true,
+          terminationGraceMs,
+        });
+      } catch {
+        throw new ToolError("The approved test command could not be started");
+      }
+      return { text: JSON.stringify(result) };
     }
     throw new ToolError(`Unknown tool: ${name}`);
   }

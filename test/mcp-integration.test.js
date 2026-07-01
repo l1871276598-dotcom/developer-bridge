@@ -1,24 +1,48 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
+const execFileAsync = promisify(execFile);
 
 function client() {
   return new Client({ name: "p0-integration-test", version: "1.0.0" }, { capabilities: {} });
 }
 
-async function exerciseOriginalTools(mcpClient) {
+async function prepareWorkspace(workspace) {
+  await writeFile(path.join(workspace, "package.json"), JSON.stringify({
+    type: "module",
+    scripts: { test: "node --test target.test.js" },
+  }), "utf8");
+  await writeFile(path.join(workspace, "target.test.js"), [
+    'import test from "node:test";',
+    'import assert from "node:assert/strict";',
+    'test("passes", () => assert.equal(2 + 2, 4));',
+    "",
+  ].join("\n"), "utf8");
+  await writeFile(path.join(workspace, "tracked.txt"), "before\n", "utf8");
+  const git = (...args) => execFileAsync("git", args, { cwd: workspace });
+  await git("init", "--quiet");
+  await git("config", "user.email", "test@example.invalid");
+  await git("config", "user.name", "Developer Bridge Test");
+  await git("add", "package.json", "target.test.js", "tracked.txt");
+  await git("commit", "--quiet", "-m", "fixture");
+}
+
+async function exerciseAllTools(mcpClient) {
   const tools = await mcpClient.listTools();
-  assert.deepEqual(tools.tools.map(({ name }) => name), ["list_files", "read_file", "write_file"]);
+  assert.deepEqual(tools.tools.map(({ name }) => name), [
+    "list_files", "read_file", "write_file", "git_status", "git_diff", "run_tests",
+  ]);
   const write = await mcpClient.callTool({
     name: "write_file",
     arguments: { path: "integration.txt", content: "integration body" },
@@ -28,6 +52,17 @@ async function exerciseOriginalTools(mcpClient) {
   assert.equal(read.content[0].text, "integration body");
   const list = await mcpClient.callTool({ name: "list_files", arguments: { path: "." } });
   assert.match(list.content[0].text, /FILE integration\.txt/);
+  const trackedWrite = await mcpClient.callTool({
+    name: "write_file",
+    arguments: { path: "tracked.txt", content: "after\n" },
+  });
+  assert.equal(trackedWrite.isError, undefined);
+  const status = await mcpClient.callTool({ name: "git_status", arguments: {} });
+  assert.match(status.content[0].text, / M tracked\.txt/);
+  const diff = await mcpClient.callTool({ name: "git_diff", arguments: { staged: false } });
+  assert.match(diff.content[0].text, /\+after/);
+  const tests = await mcpClient.callTool({ name: "run_tests", arguments: { test: "default" } });
+  assert.equal(JSON.parse(tests.content[0].text).exitCode, 0);
 }
 
 async function freePort() {
@@ -50,9 +85,10 @@ async function waitForHealth(port) {
   throw new Error("HTTP server did not become healthy");
 }
 
-test("stdio transport scans and runs the three original tools", async (t) => {
+test("stdio transport scans and runs all six approved tools", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-stdio-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
+  await prepareWorkspace(workspace);
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["server.js"],
@@ -65,13 +101,14 @@ test("stdio transport scans and runs the three original tools", async (t) => {
   const mcpClient = client();
   t.after(() => mcpClient.close());
   await mcpClient.connect(transport);
-  await exerciseOriginalTools(mcpClient);
+  await exerciseAllTools(mcpClient);
   assert.doesNotMatch(stderr, /integration body/);
   assert.doesNotMatch(stderr, new RegExp(workspace));
 });
 
-test("HTTP transport scans and runs the three original tools without leaking route", async (t) => {
+test("HTTP transport scans and runs all six approved tools without leaking route", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-http-"));
+  await prepareWorkspace(workspace);
   const port = await freePort();
   const route = "mcp-integration-secret";
   const child = spawn(process.execPath, ["mcp-http.js"], {
@@ -102,7 +139,7 @@ test("HTTP transport scans and runs the three original tools without leaking rou
   transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/${route}`));
   mcpClient = client();
   await mcpClient.connect(transport);
-  await exerciseOriginalTools(mcpClient);
+  await exerciseAllTools(mcpClient);
   assert.doesNotMatch(output, /integration body/);
   assert.doesNotMatch(output, new RegExp(workspace));
   assert.doesNotMatch(output, new RegExp(route));
