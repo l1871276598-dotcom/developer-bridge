@@ -13,6 +13,10 @@ import {
   LOCAL_PUBLISH_TOOL_DEFINITIONS,
   createLocalPublishTools,
 } from "./local-publish-tools.js";
+import {
+  GITHUB_PUBLISH_TOOL_DEFINITIONS,
+  createGitHubPublishTools,
+} from "./github-publish-tools.js";
 
 export { MAX_COMMAND_OUTPUT_BYTES };
 
@@ -109,6 +113,7 @@ const TOOL_DEFINITIONS = Object.freeze([
     annotations: { readOnlyHint: false },
   },
   ...LOCAL_PUBLISH_TOOL_DEFINITIONS,
+  ...GITHUB_PUBLISH_TOOL_DEFINITIONS,
 ]);
 
 class ToolError extends Error {}
@@ -427,7 +432,18 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
     ToolError,
   });
 
+  const githubPublishTools = createGitHubPublishTools({
+    root,
+    runGit,
+    canonicalPath: fs.realpath,
+    allowedBranch: options.allowedBranch,
+    ToolError,
+  });
+
   async function invoke(name, args, onValidatedPath) {
+    if (githubPublishTools.names.has(name)) {
+      return githubPublishTools.invoke(name, args);
+    }
     if (localPublishTools.names.has(name)) {
       const result = await localPublishTools.invoke(name, args);
       onValidatedPath(result.relativePath);

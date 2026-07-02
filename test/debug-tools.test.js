@@ -59,10 +59,10 @@ async function fixture(t, { initializeGit = true, packageTest = "node --test tar
   return { workspace, core };
 }
 
-test("exposes exactly nine tools with strict schemas and expected annotations", async (t) => {
+test("exposes exactly ten tools with strict schemas and expected annotations", async (t) => {
   const { core } = await fixture(t);
   assert.deepEqual(core.tools.map(({ name }) => name), [
-    "list_files", "read_file", "write_file", "git_status", "git_diff", "run_tests", "run_python_file", "git_add", "git_commit",
+    "list_files", "read_file", "write_file", "git_status", "git_diff", "run_tests", "run_python_file", "git_add", "git_commit", "git_push",
   ]);
   for (const tool of core.tools) assert.equal(tool.inputSchema.additionalProperties, false);
   assert.equal(core.tools.find(({ name }) => name === "git_status").annotations.readOnlyHint, true);
