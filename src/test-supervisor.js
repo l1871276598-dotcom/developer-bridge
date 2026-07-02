@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 
 let terminating = false;
 let terminationHold;
@@ -8,8 +10,12 @@ process.on("SIGTERM", () => {
   terminationHold ??= setInterval(() => {}, 1_000);
 });
 
+const requestedProfile = process.env.DEVELOPER_BRIDGE_TEST_PROFILE || "npm";
+const hasPythonTests = existsSync(path.join(process.cwd(), "tests"));
 const testProfile =
-  process.env.DEVELOPER_BRIDGE_TEST_PROFILE || "npm";
+  requestedProfile === "python-unittest" && !hasPythonTests
+    ? "npm"
+    : requestedProfile;
 
 const approvedTests = {
   npm: {
