@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { access, chmod, link, mkdtemp, mkdir, open, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import { MAX_COMMAND_OUTPUT_BYTES } from "../src/bounded-process.js";
 import { createBridgeCore } from "../src/bridge-core.js";
 import { createLocalPublishTools } from "../src/local-publish-tools.js";
+
+const execFileAsync = promisify(execFile);
 
 function resultText(result) {
   return result.content[0].text;
@@ -255,10 +259,10 @@ test("run_python_file preserves direct-script metadata without adding the script
   assert.deepEqual(metadata, { argv0: canonical, file: canonical, script_dir_on_path: false });
 });
 
-test("run_python_file executes in the real __main__ module with direct-script loader and import semantics", async (t) => {
+test("run_python_file matches direct isolated-script __main__ loader and import semantics", async (t) => {
   const { workspace, core } = await fixture(t);
   await writeFile(path.join(workspace, "sibling.py"), "value = 'unexpected'\n", "utf8");
-  const result = await runScript(core, workspace, [
+  const source = [
     "import json, sys",
     "shared_value = 'visible'",
     "import __main__",
@@ -269,25 +273,30 @@ test("run_python_file executes in the real __main__ module with direct-script lo
     "    sibling_imported = False",
     "print(json.dumps({",
     "    'shared': __main__.shared_value,",
-    "    'loader': __loader__,",
+    "    'loader_type': f'{type(__loader__).__module__}.{type(__loader__).__qualname__}',",
+    "    'loader_name': getattr(__loader__, 'name', None),",
+    "    'loader_path': getattr(__loader__, 'path', None),",
     "    'package': __package__,",
     "    'spec': __spec__,",
     "    'cached': __cached__,",
+    "    'file': __file__,",
+    "    'argv0': sys.argv[0],",
     "    'sibling_imported': sibling_imported,",
     "}))",
     "",
-  ].join("\n"));
+  ].join("\n");
+  const script = path.join(workspace, "task.py");
+  await writeFile(script, source, "utf8");
+  const canonicalScript = path.join(await realpath(workspace), "task.py");
+  const direct = await execFileAsync("python3", ["-I", canonicalScript], { cwd: workspace });
+  const result = await core.callTool("run_python_file", { path: "task.py" });
   assert.equal(result.isError, undefined);
   const payload = JSON.parse(resultText(result));
   assert.equal(payload.exitCode, 0);
-  assert.deepEqual(JSON.parse(payload.stdout), {
-    shared: "visible",
-    loader: null,
-    package: null,
-    spec: null,
-    cached: null,
-    sibling_imported: false,
-  });
+  const actual = JSON.parse(payload.stdout);
+  assert.deepEqual(actual, JSON.parse(direct.stdout));
+  assert.equal(actual.shared, "visible");
+  assert.equal(actual.sibling_imported, false);
 });
 
 test("run_python_file independently caps stdout at 1 MiB", async (t) => {

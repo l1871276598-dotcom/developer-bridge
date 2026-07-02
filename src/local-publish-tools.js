@@ -2,7 +2,7 @@ import path from "node:path";
 
 const PYTHON_FD_WRAPPER = [
   "def _run():",
-  "    import os, stat, sys",
+  "    import importlib.machinery, os, stat, sys",
   "    relative_path, script_path = sys.argv[1], sys.argv[2]",
   "    components = relative_path.split(os.sep)",
   "    open_flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)",
@@ -35,7 +35,8 @@ const PYTHON_FD_WRAPPER = [
   "        os.close(directory_fd)",
   "    sys.argv = [script_path]",
   "    main = sys.modules['__main__'].__dict__",
-  "    main.update({'__file__': script_path, '__loader__': None, '__package__': None, '__spec__': None, '__cached__': None})",
+  "    loader = importlib.machinery.SourceFileLoader('__main__', script_path)",
+  "    main.update({'__file__': script_path, '__loader__': loader, '__package__': None, '__spec__': None, '__cached__': None})",
   "    main.pop('_run', None)",
   "    exec(compile(source, script_path, 'exec'), main, main)",
   "_run()",
