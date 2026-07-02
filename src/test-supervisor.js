@@ -8,7 +8,31 @@ process.on("SIGTERM", () => {
   terminationHold ??= setInterval(() => {}, 1_000);
 });
 
-const child = spawn("npm", ["test"], {
+const testProfile =
+  process.env.DEVELOPER_BRIDGE_TEST_PROFILE || "npm";
+
+const approvedTests = {
+  npm: {
+    command: "npm",
+    args: ["test"],
+  },
+  "python-unittest": {
+    command: "python3",
+    args: ["-m", "unittest", "discover", "-s", "tests", "-v"],
+  },
+};
+
+const selectedTest = approvedTests[testProfile];
+
+if (!selectedTest) {
+  console.error("Unsupported approved test profile");
+  process.exit(2);
+}
+
+const testCommand = selectedTest.command;
+const testArgs = selectedTest.args;
+
+const child = spawn(testCommand, testArgs, {
   shell: false,
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -18,7 +42,9 @@ child.stderr.pipe(process.stderr, { end: false });
 
 child.once("error", () => {
   if (terminating) return;
-  console.error("The approved npm test process could not be started");
+  console.error(
+    `The approved test process could not be started: ${testCommand}`
+  );
   process.exitCode = 1;
 });
 
