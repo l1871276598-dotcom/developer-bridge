@@ -25,10 +25,10 @@ function resultText(result) {
   return result.content[0].text;
 }
 
-test("exposes exactly the seven approved tools with strict object schemas", async (t) => {
+test("exposes exactly the nine approved tools with strict object schemas", async (t) => {
   const { core } = await fixture(t);
   assert.deepEqual(core.tools.map(({ name }) => name), [
-    "list_files", "read_file", "write_file", "git_status", "git_diff", "run_tests", "run_python_file",
+    "list_files", "read_file", "write_file", "git_status", "git_diff", "run_tests", "run_python_file", "git_add", "git_commit",
   ]);
   for (const tool of core.tools) assert.equal(tool.inputSchema.additionalProperties, false);
 });

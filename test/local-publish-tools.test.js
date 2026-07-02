@@ -33,6 +33,188 @@ async function runScript(core, workspace, source, options = {}) {
   return core.callTool("run_python_file", { path: script });
 }
 
+async function git(cwd, ...args) {
+  return execFileAsync("git", args, { cwd });
+}
+
+async function gitFixture(t, options = {}) {
+  const base = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-publish-git-"));
+  const workspace = path.join(base, "workspace");
+  await mkdir(workspace);
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await git(workspace, "init", "--quiet");
+  await git(workspace, "config", "user.email", "test@example.invalid");
+  await git(workspace, "config", "user.name", "Developer Bridge Test");
+  await writeFile(path.join(workspace, "tracked.txt"), "before\n", "utf8");
+  await writeFile(path.join(workspace, "other.txt"), "before\n", "utf8");
+  await git(workspace, "add", "tracked.txt", "other.txt");
+  await git(workspace, "commit", "--quiet", "-m", "fixture");
+  const logs = [];
+  const core = await createBridgeCore(options.authorizedRoot ?? workspace, (line) => logs.push(line));
+  return { base, workspace, logs, core };
+}
+
+test("git_add and git_commit expose strict destructive schemas", async (t) => {
+  const { core } = await fixture(t);
+  const add = core.tools.find(({ name }) => name === "git_add");
+  const commit = core.tools.find(({ name }) => name === "git_commit");
+  assert.deepEqual(add.inputSchema, {
+    type: "object",
+    properties: { paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 128 } },
+    required: ["paths"],
+    additionalProperties: false,
+  });
+  assert.deepEqual(commit.inputSchema, {
+    type: "object",
+    properties: { message: { type: "string", minLength: 1, maxLength: 200 } },
+    required: ["message"],
+    additionalProperties: false,
+  });
+  assert.deepEqual(add.annotations, { readOnlyHint: false, destructiveHint: true });
+  assert.deepEqual(commit.annotations, { readOnlyHint: false, destructiveHint: true });
+});
+
+test("git_add stages only deduplicated explicit files and returns staged short status", async (t) => {
+  const { workspace, core } = await gitFixture(t);
+  await writeFile(path.join(workspace, "tracked.txt"), "staged\n", "utf8");
+  await writeFile(path.join(workspace, "other.txt"), "unstaged\n", "utf8");
+
+  const result = await core.callTool("git_add", { paths: ["tracked.txt", "tracked.txt"] });
+  assert.equal(result.isError, undefined);
+  assert.match(resultText(result), /^M  tracked\.txt$/m);
+  assert.doesNotMatch(resultText(result), /other\.txt/);
+  const status = (await git(workspace, "status", "--short")).stdout;
+  assert.match(status, /^M  tracked\.txt$/m);
+  assert.match(status, /^ M other\.txt$/m);
+});
+
+test("git_add requires a strict nonempty string path array of at most 128 items", async (t) => {
+  const { core } = await gitFixture(t);
+  const invalid = [
+    {}, { paths: [] }, { paths: "tracked.txt" }, { paths: [12] },
+    { paths: ["tracked.txt"], extra: true }, null, [],
+    { paths: Array.from({ length: 129 }, (_, index) => `file-${index}.txt`) },
+  ];
+  for (const args of invalid) {
+    assert.equal((await core.callTool("git_add", args)).isError, true, JSON.stringify(args));
+  }
+});
+
+test("git_add rejects pathspecs, protected paths, symlinks, hard links, directories, and missing files", async (t) => {
+  const { base, workspace, core } = await gitFixture(t);
+  const outside = path.join(base, "outside.txt");
+  await writeFile(outside, "outside\n", "utf8");
+  await writeFile(path.join(workspace, ".env"), "secret\n", "utf8");
+  await writeFile(path.join(workspace, ".env.production"), "secret\n", "utf8");
+  await writeFile(path.join(workspace, "secret.pem"), "secret\n", "utf8");
+  await mkdir(path.join(workspace, "directory"));
+  await mkdir(path.join(workspace, "node_modules"));
+  await writeFile(path.join(workspace, "node_modules", "package.js"), "x\n", "utf8");
+  await symlink(outside, path.join(workspace, "escape.txt"), "file");
+  await symlink(path.join(workspace, "tracked.txt"), path.join(workspace, "inside-link.txt"), "file");
+  await link(path.join(workspace, "tracked.txt"), path.join(workspace, "hard-link.txt"));
+
+  const invalidPaths = [
+    ".", "-A", "--all", "../outside.txt", path.join(workspace, "tracked.txt"),
+    "*.txt", "file?.txt", "[ab].txt", ":(glob)*", ":!tracked.txt", ":^tracked.txt", ":/tracked.txt",
+    ".git/config", ".env", ".env.production", "node_modules/package.js", "secret.pem", "id_rsa", "id_ed25519", "secret.key",
+    "nested/../other.txt",
+    "escape.txt", "inside-link.txt", "hard-link.txt", "directory", "missing.txt",
+  ];
+  for (const invalidPath of invalidPaths) {
+    const result = await core.callTool("git_add", { paths: [invalidPath] });
+    assert.equal(result.isError, true, `expected rejection for ${invalidPath}`);
+  }
+});
+
+test("git_add requires the authorized workspace to equal the repository top level", async (t) => {
+  const { workspace } = await gitFixture(t);
+  const nested = path.join(workspace, "nested");
+  await mkdir(nested);
+  await writeFile(path.join(nested, "file.txt"), "nested\n", "utf8");
+  const core = await createBridgeCore(nested, () => {});
+  const result = await core.callTool("git_add", { paths: ["file.txt"] });
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), /top level|repository root/i);
+});
+
+test("git_add permits repository clean filters as an explicit trust boundary without generic Git arguments", async (t) => {
+  const { workspace, core } = await gitFixture(t);
+  const canary = path.join(workspace, "clean-filter-ran");
+  const filter = path.join(workspace, "clean-filter.sh");
+  await writeFile(filter, `#!/bin/sh\ntouch "${canary}"\ncat\n`, "utf8");
+  await chmod(filter, 0o755);
+  await writeFile(path.join(workspace, ".gitattributes"), "filtered.txt filter=canary\n", "utf8");
+  await writeFile(path.join(workspace, "filtered.txt"), "filtered\n", "utf8");
+  await git(workspace, "config", "filter.canary.clean", filter);
+
+  const result = await core.callTool("git_add", { paths: [".gitattributes", "filtered.txt"] });
+  assert.equal(result.isError, undefined);
+  await access(canary);
+  assert.equal((await core.callTool("git_add", { paths: ["--renormalize"] })).isError, true);
+});
+
+test("git_commit commits staged content only and returns a full oid plus one-line summary", async (t) => {
+  const { workspace, core } = await gitFixture(t);
+  await writeFile(path.join(workspace, "tracked.txt"), "staged\n", "utf8");
+  await writeFile(path.join(workspace, "other.txt"), "unstaged\n", "utf8");
+  assert.equal((await core.callTool("git_add", { paths: ["tracked.txt"] })).isError, undefined);
+
+  const result = await core.callTool("git_commit", { message: "controlled commit" });
+  assert.equal(result.isError, undefined);
+  const payload = JSON.parse(resultText(result));
+  assert.match(payload.oid, /^[0-9a-f]{40,64}$/);
+  assert.equal(payload.summary, "controlled commit");
+  assert.equal((await git(workspace, "show", "--format=", "--name-only", "HEAD")).stdout.trim(), "tracked.txt");
+  assert.match((await git(workspace, "status", "--short")).stdout, /^ M other\.txt$/m);
+});
+
+test("git_commit requires one safe line of at most 200 UTF-8 bytes and no extra controls", async (t) => {
+  const { core } = await gitFixture(t);
+  const invalid = [
+    {}, { message: "" }, { message: "   \t" }, { message: "-message" },
+    { message: "line\nnext" }, { message: "line\rnext" }, { message: "é".repeat(101) },
+    { message: 12 }, { message: "ok", author: "attacker" }, { message: "ok", amend: true },
+    { message: "ok", verify: true }, { message: "ok", allowEmpty: true }, null, [],
+  ];
+  for (const args of invalid) {
+    assert.equal((await core.callTool("git_commit", args)).isError, true, JSON.stringify(args));
+  }
+});
+
+test("git_commit refuses an empty staged diff", async (t) => {
+  const { core } = await gitFixture(t);
+  const result = await core.callTool("git_commit", { message: "nothing staged" });
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), /nothing staged|staged diff/i);
+});
+
+test("git_commit disables hooks and signing and never logs the commit message", async (t) => {
+  const { workspace, logs, core } = await gitFixture(t);
+  const hookCanary = path.join(workspace, "hook-canary");
+  const signingCanary = path.join(workspace, "signing-canary");
+  const hooks = path.join(workspace, ".git", "hooks");
+  for (const name of ["pre-commit", "commit-msg"]) {
+    const hook = path.join(hooks, name);
+    await writeFile(hook, `#!/bin/sh\ntouch "${hookCanary}"\nexit 1\n`, "utf8");
+    await chmod(hook, 0o755);
+  }
+  const signer = path.join(workspace, "failing-gpg.sh");
+  await writeFile(signer, `#!/bin/sh\ntouch "${signingCanary}"\nexit 1\n`, "utf8");
+  await chmod(signer, 0o755);
+  await git(workspace, "config", "commit.gpgSign", "true");
+  await git(workspace, "config", "gpg.program", signer);
+  await writeFile(path.join(workspace, "tracked.txt"), "after\n", "utf8");
+  await core.callTool("git_add", { paths: ["tracked.txt"] });
+
+  const secretMessage = "message-must-not-appear-in-audit";
+  const result = await core.callTool("git_commit", { message: secretMessage });
+  assert.equal(result.isError, undefined);
+  await assert.rejects(access(hookCanary));
+  await assert.rejects(access(signingCanary));
+  assert.doesNotMatch(logs.join("\n"), new RegExp(secretMessage));
+});
+
 test("run_python_file exposes a strict destructive, open-world schema", async (t) => {
   const { core } = await fixture(t);
   const definition = core.tools.find(({ name }) => name === "run_python_file");

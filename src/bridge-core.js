@@ -206,7 +206,7 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
   }
   if (typeof beforePythonOpen !== "function") throw new Error("Python open seam must be a function");
 
-  async function runGit(args) {
+  async function runGitResult(args) {
     let result;
     try {
       result = await runBoundedProcess("git", args, {
@@ -221,6 +221,11 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
       throw new ToolError("Git output size limit exceeded; narrow the workspace changes before retrying");
     }
     if (result.timedOut) throw new ToolError("Git operation timed out");
+    return result;
+  }
+
+  async function runGit(args) {
+    const result = await runGitResult(args);
     if (result.exitCode !== 0) {
       if (/not a git repository/iu.test(result.stderr)) throw new ToolError("Authorized workspace is not a Git repository");
       throw new ToolError("Git operation failed");
@@ -296,6 +301,30 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
       await handle?.close().catch(() => {});
       if (error instanceof ToolError) throw error;
       throw new ToolError("Workspace root could not be opened safely");
+    }
+  }
+
+  async function verifiedGitFile(relativePath) {
+    let current = root;
+    const segments = relativePath.split(path.sep);
+    for (const [index, segment] of segments.entries()) {
+      current = path.join(current, segment);
+      let componentStat;
+      try {
+        componentStat = await fs.lstat(current);
+      } catch {
+        throw new ToolError("Path does not exist");
+      }
+      if (componentStat.isSymbolicLink()) throw new ToolError("Symbolic links are not allowed for Git staging");
+      if (index < segments.length - 1 && !componentStat.isDirectory()) {
+        throw new ToolError("Git path components must identify directories");
+      }
+      if (index === segments.length - 1 && !componentStat.isFile()) {
+        throw new ToolError("Git path must identify a file");
+      }
+      if (index === segments.length - 1 && componentStat.nlink > 1) {
+        throw new ToolError("Hard-linked files are not allowed");
+      }
     }
   }
 
@@ -386,6 +415,10 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
     root,
     normalizePath: normalizeRelativePath,
     existingFile: verifiedPythonRoot,
+    validateGitFile: verifiedGitFile,
+    runGit,
+    runGitResult,
+    canonicalPath: fs.realpath,
     runProcess: runBoundedProcess,
     timeoutMs: publishTimeoutMs,
     terminationGraceMs: publishTerminationGraceMs,

@@ -54,22 +54,155 @@ export const LOCAL_PUBLISH_TOOL_DEFINITIONS = Object.freeze([
     },
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   },
+  {
+    name: "git_add",
+    description: "Stage only explicitly listed existing files in the authorized repository.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 128 },
+      },
+      required: ["paths"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true },
+  },
+  {
+    name: "git_commit",
+    description: "Commit the currently staged changes with one explicit message.",
+    inputSchema: {
+      type: "object",
+      properties: { message: { type: "string", minLength: 1, maxLength: 200 } },
+      required: ["message"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true },
+  },
 ]);
+
+const PROTECTED_DIRECTORY_SEGMENTS = new Set([".git", "node_modules"]);
+const PROTECTED_BASENAMES = new Set([".env", "id_rsa", "id_ed25519"]);
+const PROTECTED_EXTENSIONS = new Set([".pem", ".key"]);
+
+function assertArguments(args, allowed, required) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    throw new TypeError("Arguments must be an object");
+  }
+  for (const key of Object.keys(args)) {
+    if (!allowed.includes(key)) throw new TypeError(`Unexpected argument: ${key}`);
+  }
+  for (const key of required) {
+    if (!(key in args)) throw new TypeError(`Missing required argument: ${key}`);
+  }
+}
+
+function assertConservativeGitPath(relativePath, ToolError) {
+  if (
+    relativePath === "." ||
+    relativePath.startsWith("-") ||
+    relativePath.startsWith(":") ||
+    /[*?[\]\\]/u.test(relativePath)
+  ) {
+    throw new ToolError("Git paths must be explicit literal file paths");
+  }
+  const segments = relativePath.split(path.sep).map((segment) => segment.toLowerCase());
+  const basename = segments.at(-1);
+  if (
+    segments.some((segment) => PROTECTED_DIRECTORY_SEGMENTS.has(segment)) ||
+    (PROTECTED_BASENAMES.has(basename) || basename.startsWith(".env.")) ||
+    PROTECTED_EXTENSIONS.has(path.extname(basename))
+  ) {
+    throw new ToolError("Staging this protected path is not allowed");
+  }
+}
 
 export function createLocalPublishTools({
   root,
   normalizePath,
   existingFile,
+  validateGitFile,
+  runGit,
+  runGitResult,
+  canonicalPath,
   runProcess,
   timeoutMs,
   terminationGraceMs,
   pythonCommand = "python3",
   ToolError,
 }) {
-  const names = new Set(["run_python_file"]);
+  const names = new Set(["run_python_file", "git_add", "git_commit"]);
+
+  async function assertRepositoryRoot() {
+    const topLevel = (await runGit(["rev-parse", "--show-toplevel"])).trimEnd();
+    let canonicalTopLevel;
+    try {
+      canonicalTopLevel = await canonicalPath(topLevel);
+    } catch {
+      throw new ToolError("Git repository root could not be verified");
+    }
+    if (canonicalTopLevel !== root) {
+      throw new ToolError("Authorized workspace must equal the Git repository top level");
+    }
+  }
+
+  async function invokeGitAdd(args) {
+    assertArguments(args, ["paths"], ["paths"]);
+    if (!Array.isArray(args.paths) || args.paths.length < 1 || args.paths.length > 128) {
+      throw new ToolError("paths must be a non-empty array of at most 128 strings");
+    }
+    const paths = [];
+    const seen = new Set();
+    for (const input of args.paths) {
+      if (typeof input !== "string") throw new ToolError("Every Git path must be a string");
+      if (input.split(/[\\/]/u).some((segment) => segment === "." || segment === "..")) {
+        throw new ToolError("Git paths must not contain dot path segments");
+      }
+      const relativePath = normalizePath(input);
+      assertConservativeGitPath(relativePath, ToolError);
+      await validateGitFile(relativePath);
+      if (!seen.has(relativePath)) {
+        seen.add(relativePath);
+        paths.push(relativePath);
+      }
+    }
+    await assertRepositoryRoot();
+    await runGit(["add", "--", ...paths]);
+    const status = await runGit(["status", "--short", "--", ...paths]);
+    return { text: status.length === 0 ? "no staged changes" : status };
+  }
+
+  async function invokeGitCommit(args) {
+    assertArguments(args, ["message"], ["message"]);
+    if (
+      typeof args.message !== "string" ||
+      args.message.trim().length === 0 ||
+      args.message.startsWith("-") ||
+      /[\0\r\n]/u.test(args.message) ||
+      Buffer.byteLength(args.message, "utf8") > 200
+    ) {
+      throw new ToolError("message must be one nonempty safe line of at most 200 UTF-8 bytes");
+    }
+    await assertRepositoryRoot();
+    const diff = await runGitResult(["diff", "--cached", "--quiet", "--no-ext-diff", "--no-textconv"]);
+    if (diff.exitCode === 0) throw new ToolError("Nothing staged to commit");
+    if (diff.exitCode !== 1) throw new ToolError("Git operation failed");
+    await runGit([
+      "-c", "core.hooksPath=/dev/null",
+      "-c", "commit.gpgSign=false",
+      "commit", "--no-verify", "--no-gpg-sign", "-m", args.message,
+    ]);
+    const identity = (await runGit(["log", "-1", "--format=%H%x00%s"])).trimEnd();
+    const separator = identity.indexOf("\0");
+    if (separator < 1) throw new ToolError("Git operation failed");
+    return {
+      text: JSON.stringify({ oid: identity.slice(0, separator), summary: identity.slice(separator + 1) }),
+    };
+  }
 
   async function invoke(name, args) {
     if (!names.has(name)) throw new ToolError(`Unknown local publish tool: ${name}`);
+    if (name === "git_add") return invokeGitAdd(args);
+    if (name === "git_commit") return invokeGitCommit(args);
     if (!args || typeof args !== "object" || Array.isArray(args)) {
       throw new ToolError("Arguments must be an object");
     }
