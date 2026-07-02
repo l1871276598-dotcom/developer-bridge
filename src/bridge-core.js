@@ -9,11 +9,16 @@ import {
   MAX_COMMAND_OUTPUT_BYTES,
   runBoundedProcess,
 } from "./bounded-process.js";
+import {
+  LOCAL_PUBLISH_TOOL_DEFINITIONS,
+  createLocalPublishTools,
+} from "./local-publish-tools.js";
 
 export { MAX_COMMAND_OUTPUT_BYTES };
 
 export const MAX_FILE_BYTES = 1024 * 1024;
 export const RUN_TESTS_TIMEOUT_MS = 120 * 1000;
+export const RUN_PUBLISH_TIMEOUT_MS = 120 * 1000;
 
 const GIT_TIMEOUT_MS = 30 * 1000;
 const TEST_SUPERVISOR_PATH = fileURLToPath(new URL("./test-supervisor.js", import.meta.url));
@@ -103,6 +108,7 @@ const TOOL_DEFINITIONS = Object.freeze([
     },
     annotations: { readOnlyHint: false },
   },
+  ...LOCAL_PUBLISH_TOOL_DEFINITIONS,
 ]);
 
 class ToolError extends Error {}
@@ -184,8 +190,18 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
 
   const testTimeoutMs = options.testTimeoutMs ?? RUN_TESTS_TIMEOUT_MS;
   const terminationGraceMs = options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
+  const publishTimeoutMs = options.publishTimeoutMs ?? RUN_PUBLISH_TIMEOUT_MS;
+  const publishTerminationGraceMs = options.publishTerminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
+  const pythonCommand = options.pythonCommand ?? "python3";
   if (!Number.isInteger(testTimeoutMs) || testTimeoutMs <= 0) throw new Error("Test timeout must be a positive integer");
   if (!Number.isInteger(terminationGraceMs) || terminationGraceMs < 0) throw new Error("Termination grace must be a non-negative integer");
+  if (!Number.isInteger(publishTimeoutMs) || publishTimeoutMs <= 0) throw new Error("Publish timeout must be a positive integer");
+  if (!Number.isInteger(publishTerminationGraceMs) || publishTerminationGraceMs < 0) {
+    throw new Error("Publish termination grace must be a non-negative integer");
+  }
+  if (typeof pythonCommand !== "string" || pythonCommand.length === 0) {
+    throw new Error("Python command must be a non-empty string");
+  }
 
   async function runGit(args) {
     let result;
@@ -315,7 +331,23 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
     }
   }
 
+  const localPublishTools = createLocalPublishTools({
+    root,
+    normalizePath: normalizeRelativePath,
+    existingFile: (relativePath) => existingTarget(relativePath, "file"),
+    runProcess: runBoundedProcess,
+    timeoutMs: publishTimeoutMs,
+    terminationGraceMs: publishTerminationGraceMs,
+    pythonCommand,
+    ToolError,
+  });
+
   async function invoke(name, args, onValidatedPath) {
+    if (localPublishTools.names.has(name)) {
+      const result = await localPublishTools.invoke(name, args);
+      onValidatedPath(result.relativePath);
+      return result;
+    }
     if (name === "list_files") {
       assertPlainArguments(args, ["path"]);
       const relativePath = normalizeRelativePath(args.path, true);
