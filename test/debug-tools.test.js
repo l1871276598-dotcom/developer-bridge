@@ -26,8 +26,11 @@ test("runBoundedProcess returns structured output for a failing command", async 
     "timedOut",
   ]);
   assert.equal(result.exitCode, 7);
-  assert.match(result.stdout, /OUT/);
-  assert.match(result.stderr, /ERR/);
+  assert.equal(result.signal, null);
+  assert.equal(result.stdout, "OUT\n");
+  assert.equal(result.stderr, "ERR\n");
+  assert.equal(result.timedOut, false);
+  assert.equal(result.outputLimitExceeded, false);
 });
 
 function resultText(result) {
