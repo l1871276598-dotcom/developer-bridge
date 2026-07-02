@@ -128,6 +128,7 @@ export function createLocalPublishTools({
   timeoutMs,
   terminationGraceMs,
   pythonCommand = "python3",
+  allowedBranch,
   ToolError,
 }) {
   const names = new Set(["run_python_file", "git_add", "git_commit"]);
@@ -142,6 +143,17 @@ export function createLocalPublishTools({
     }
     if (canonicalTopLevel !== root) {
       throw new ToolError("Authorized workspace must equal the Git repository top level");
+    }
+  }
+
+  async function assertAllowedBranch() {
+    if (allowedBranch === undefined) return;
+    const currentBranch = (await runGit(["branch", "--show-current"])).trimEnd();
+    if (currentBranch.length === 0) {
+      throw new ToolError("Detached HEAD is not an authorized branch");
+    }
+    if (currentBranch !== allowedBranch) {
+      throw new ToolError("Current Git branch is not the configured allowed branch");
     }
   }
 
@@ -166,6 +178,7 @@ export function createLocalPublishTools({
       }
     }
     await assertRepositoryRoot();
+    await assertAllowedBranch();
     await runGit(["add", "--", ...paths]);
     const status = await runGit(["status", "--short", "--", ...paths]);
     return { text: status.length === 0 ? "no staged changes" : status };
@@ -183,6 +196,7 @@ export function createLocalPublishTools({
       throw new ToolError("message must be one nonempty safe line of at most 200 UTF-8 bytes");
     }
     await assertRepositoryRoot();
+    await assertAllowedBranch();
     const diff = await runGitResult(["diff", "--cached", "--quiet", "--no-ext-diff", "--no-textconv"]);
     if (diff.exitCode === 0) throw new ToolError("Nothing staged to commit");
     if (diff.exitCode !== 1) throw new ToolError("Git operation failed");

@@ -60,6 +60,7 @@ function cleanEnv(overrides = {}) {
   const env = { ...process.env, ...overrides };
   delete env.DEVELOPER_BRIDGE_WORKSPACE;
   delete env.MCP_PATH;
+  delete env.DEVELOPER_BRIDGE_ALLOWED_BRANCH;
   return { ...env, ...overrides };
 }
 
@@ -88,6 +89,24 @@ test("HTTP server rejects a missing MCP_PATH", async () => {
   }
 });
 
+test("HTTP server rejects a missing allowed branch", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-"));
+  try {
+    const result = await runHttpServer(
+      cleanEnv({
+        DEVELOPER_BRIDGE_WORKSPACE: workspace,
+        MCP_PATH: "mcp-valid",
+      }),
+    );
+
+    assert.equal(result.timedOut, false);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /DEVELOPER_BRIDGE_ALLOWED_BRANCH/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 for (const invalidRoute of [
   "http://example.invalid/mcp",
   "https://example.invalid/mcp",
@@ -105,6 +124,7 @@ for (const invalidRoute of [
         cleanEnv({
           DEVELOPER_BRIDGE_WORKSPACE: workspace,
           MCP_PATH: invalidRoute,
+          DEVELOPER_BRIDGE_ALLOWED_BRANCH: "codex/stage-07-learning-loop",
         }),
       );
 
@@ -131,6 +151,7 @@ test("HTTP server rejects a workspace that is not an existing directory", async 
   const result = await runHttpServer(cleanEnv({
     DEVELOPER_BRIDGE_WORKSPACE: path.join(os.tmpdir(), "developer-bridge-does-not-exist"),
     MCP_PATH: "mcp-valid",
+    DEVELOPER_BRIDGE_ALLOWED_BRANCH: "codex/stage-07-learning-loop",
   }));
   assert.equal(result.timedOut, false);
   assert.notEqual(result.code, 0);
@@ -146,6 +167,7 @@ test("valid HTTP configuration starts without logging workspace or MCP route", a
         DEVELOPER_BRIDGE_WORKSPACE: workspace,
         MCP_PATH: route,
         DEVELOPER_BRIDGE_PORT: "0",
+        DEVELOPER_BRIDGE_ALLOWED_BRANCH: "codex/stage-07-learning-loop",
       }),
       { readyPattern: /running/i },
     );

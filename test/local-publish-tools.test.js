@@ -50,7 +50,11 @@ async function gitFixture(t, options = {}) {
   await git(workspace, "add", "tracked.txt", "other.txt");
   await git(workspace, "commit", "--quiet", "-m", "fixture");
   const logs = [];
-  const core = await createBridgeCore(options.authorizedRoot ?? workspace, (line) => logs.push(line));
+  const core = await createBridgeCore(
+    options.authorizedRoot ?? workspace,
+    (line) => logs.push(line),
+    options.coreOptions ?? {},
+  );
   return { base, workspace, logs, core };
 }
 
@@ -136,6 +140,25 @@ test("git_add requires the authorized workspace to equal the repository top leve
   const result = await core.callTool("git_add", { paths: ["file.txt"] });
   assert.equal(result.isError, true);
   assert.match(resultText(result), /top level|repository root/i);
+});
+
+test("git_add and git_commit reject a branch different from the configured allowed branch", async (t) => {
+  const { workspace } = await gitFixture(t);
+  const currentBranch = (await git(workspace, "branch", "--show-current")).stdout.trim();
+  const core = await createBridgeCore(workspace, () => {}, {
+    allowedBranch: `${currentBranch}-not-allowed`,
+  });
+
+  await writeFile(path.join(workspace, "tracked.txt"), "changed\n", "utf8");
+
+  const add = await core.callTool("git_add", { paths: ["tracked.txt"] });
+  assert.equal(add.isError, true);
+  assert.match(resultText(add), /allowed branch|authorized branch/i);
+
+  await git(workspace, "add", "tracked.txt");
+  const commit = await core.callTool("git_commit", { message: "must be blocked" });
+  assert.equal(commit.isError, true);
+  assert.match(resultText(commit), /allowed branch|authorized branch/i);
 });
 
 test("git_add permits repository clean filters as an explicit trust boundary without generic Git arguments", async (t) => {

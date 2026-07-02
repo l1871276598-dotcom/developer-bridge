@@ -36,6 +36,10 @@ const rawMcpPath = requiredEnvironment(
   "MCP_PATH",
   'Set it to a single private route segment such as "mcp-abc123".',
 );
+const allowedBranch = requiredEnvironment(
+  "DEVELOPER_BRIDGE_ALLOWED_BRANCH",
+  "Set it to the single Git branch that this Bridge may modify, commit, and push.",
+);
 
 if (!/^[A-Za-z0-9._~-]+$/.test(rawMcpPath) || rawMcpPath === "." || rawMcpPath === "..") {
   console.error(
@@ -48,7 +52,7 @@ const MCP_PATH = `/${rawMcpPath}`;
 
 let bridge;
 try {
-  bridge = await createBridgeCore(workspace);
+  bridge = await createBridgeCore(workspace, undefined, { allowedBranch });
 } catch (error) {
   console.error(`Configuration error: ${error instanceof Error ? error.message : "invalid workspace"}. Set DEVELOPER_BRIDGE_WORKSPACE to an existing authorized project directory.`);
   process.exit(1);

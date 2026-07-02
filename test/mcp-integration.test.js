@@ -93,7 +93,11 @@ test("stdio transport discovers nine tools and runs the baseline workflow", asyn
     command: process.execPath,
     args: ["server.js"],
     cwd: projectRoot,
-    env: { ...process.env, DEVELOPER_BRIDGE_WORKSPACE: workspace },
+    env: {
+      ...process.env,
+      DEVELOPER_BRIDGE_WORKSPACE: workspace,
+      DEVELOPER_BRIDGE_ALLOWED_BRANCH: "main",
+    },
     stderr: "pipe",
   });
   let stderr = "";
@@ -118,6 +122,7 @@ test("HTTP transport discovers nine tools and runs the baseline workflow without
       DEVELOPER_BRIDGE_WORKSPACE: workspace,
       DEVELOPER_BRIDGE_PORT: String(port),
       MCP_PATH: route,
+      DEVELOPER_BRIDGE_ALLOWED_BRANCH: "main",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

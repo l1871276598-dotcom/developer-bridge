@@ -423,6 +423,7 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
     timeoutMs: publishTimeoutMs,
     terminationGraceMs: publishTerminationGraceMs,
     pythonCommand,
+    allowedBranch: options.allowedBranch,
     ToolError,
   });
 
