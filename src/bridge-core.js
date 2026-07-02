@@ -248,6 +248,42 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
     return { target, canonical, stat };
   }
 
+  async function verifiedPythonFile(relativePath) {
+    let current = root;
+    for (const segment of relativePath.split(path.sep)) {
+      current = path.join(current, segment);
+      let componentStat;
+      try {
+        componentStat = await fs.lstat(current);
+      } catch {
+        throw new ToolError("Path does not exist");
+      }
+      if (componentStat.isSymbolicLink()) {
+        throw new ToolError("Symbolic links are not allowed for Python execution");
+      }
+    }
+
+    const { canonical, stat } = await existingTarget(relativePath, "file");
+    let handle;
+    try {
+      handle = await fs.open(canonical, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+      const openedStat = await handle.stat();
+      if (
+        !openedStat.isFile() ||
+        openedStat.nlink > 1 ||
+        openedStat.dev !== stat.dev ||
+        openedStat.ino !== stat.ino
+      ) {
+        throw new ToolError("File changed during security validation");
+      }
+      return { canonical, handle };
+    } catch (error) {
+      await handle?.close().catch(() => {});
+      if (error instanceof ToolError) throw error;
+      throw new ToolError("Python file could not be opened safely");
+    }
+  }
+
   async function writableTarget(relativePath) {
     assertWriteAllowed(relativePath);
     const target = lexicalTarget(relativePath);
@@ -334,7 +370,7 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
   const localPublishTools = createLocalPublishTools({
     root,
     normalizePath: normalizeRelativePath,
-    existingFile: (relativePath) => existingTarget(relativePath, "file"),
+    existingFile: verifiedPythonFile,
     runProcess: runBoundedProcess,
     timeoutMs: publishTimeoutMs,
     terminationGraceMs: publishTerminationGraceMs,

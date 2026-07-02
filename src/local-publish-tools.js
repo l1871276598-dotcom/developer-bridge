@@ -1,5 +1,14 @@
 import path from "node:path";
 
+const PYTHON_FD_WRAPPER = [
+  "import os, sys",
+  "script_path = sys.argv[1]",
+  "sys.argv = [script_path]",
+  "source = os.fdopen(3, 'rb', closefd=False).read()",
+  "scope = {'__name__': '__main__', '__file__': script_path, '__package__': None, '__cached__': None, '__spec__': None}",
+  "exec(compile(source, script_path, 'exec'), scope, scope)",
+].join("; ");
+
 export const LOCAL_PUBLISH_TOOL_DEFINITIONS = Object.freeze([
   {
     name: "run_python_file",
@@ -41,20 +50,26 @@ export function createLocalPublishTools({
     if (path.extname(relativePath) !== ".py") {
       throw new ToolError("Path must identify a Python .py file");
     }
-    const { canonical } = await existingFile(relativePath);
+    const { canonical, handle } = await existingFile(relativePath);
+    if (path.extname(canonical) !== ".py") {
+      await handle.close().catch(() => {});
+      throw new ToolError("Path must identify a Python .py file");
+    }
 
-    let result;
     try {
-      result = await runProcess(pythonCommand, ["-I", canonical], {
+      const result = await runProcess(pythonCommand, ["-I", "-c", PYTHON_FD_WRAPPER, canonical], {
         cwd: root,
         timeoutMs,
         detached: true,
         terminationGraceMs,
+        extraStdio: [handle.fd],
       });
+      return { relativePath, text: JSON.stringify(result) };
     } catch {
       throw new ToolError("Python could not be started");
+    } finally {
+      await handle.close().catch(() => {});
     }
-    return { relativePath, text: JSON.stringify(result) };
   }
 
   return { names, invoke };

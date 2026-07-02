@@ -26,6 +26,7 @@ export function runBoundedProcess(command, args, {
   detached = false,
   terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS,
   env = process.env,
+  extraStdio = [],
 }) {
   return new Promise((resolve, reject) => {
     const childEnv = { ...env };
@@ -35,7 +36,7 @@ export function runBoundedProcess(command, args, {
       env: childEnv,
       shell: false,
       detached,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe", ...extraStdio],
     });
     const stdoutChunks = [];
     const stderrChunks = [];
