@@ -1,16 +1,21 @@
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 
+import {
+  DEFAULT_TERMINATION_GRACE_MS,
+  MAX_COMMAND_OUTPUT_BYTES,
+  runBoundedProcess,
+} from "./bounded-process.js";
+
+export { MAX_COMMAND_OUTPUT_BYTES };
+
 export const MAX_FILE_BYTES = 1024 * 1024;
-export const MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
 export const RUN_TESTS_TIMEOUT_MS = 120 * 1000;
 
 const GIT_TIMEOUT_MS = 30 * 1000;
-const TERMINATION_GRACE_MS = 2 * 1000;
 const TEST_SUPERVISOR_PATH = fileURLToPath(new URL("./test-supervisor.js", import.meta.url));
 const SAFE_GIT_ENV = Object.freeze({
   GIT_OPTIONAL_LOCKS: "0",
@@ -163,128 +168,6 @@ function displayPath(value) {
   return JSON.stringify(String(value)).slice(1, -1).replace(/=/g, "%3D").replace(/ /g, "%20");
 }
 
-function appendBounded(chunks, chunk, state, limit) {
-  const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-  const remaining = Math.max(0, limit - state.bytes);
-  if (remaining > 0) chunks.push(buffer.subarray(0, remaining));
-  state.bytes += buffer.length;
-  return state.bytes > limit;
-}
-
-function decodeBoundedUtf8(chunks, limit) {
-  const text = Buffer.concat(chunks).toString("utf8");
-  if (Buffer.byteLength(text, "utf8") <= limit) return text;
-  const encoded = Buffer.from(text, "utf8");
-  return encoded.subarray(0, Math.max(0, limit - 3)).toString("utf8");
-}
-
-function runFixedProcess(command, args, {
-  cwd,
-  timeoutMs,
-  stdoutLimit = MAX_COMMAND_OUTPUT_BYTES,
-  stderrLimit = MAX_COMMAND_OUTPUT_BYTES,
-  detached = false,
-  terminationGraceMs = TERMINATION_GRACE_MS,
-  envOverrides = {},
-}) {
-  return new Promise((resolve, reject) => {
-    const env = { ...process.env, ...envOverrides };
-    delete env.NODE_TEST_CONTEXT;
-    const child = spawn(command, args, {
-      cwd,
-      env,
-      shell: false,
-      detached,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const stdoutChunks = [];
-    const stderrChunks = [];
-    const stdoutState = { bytes: 0 };
-    const stderrState = { bytes: 0 };
-    let timedOut = false;
-    let outputLimitExceeded = false;
-    let terminationStarted = false;
-    let forcedTermination;
-    let closedResult;
-    let settled = false;
-
-    const finish = () => {
-      if (settled || !closedResult) return;
-      settled = true;
-      resolve({
-        ...closedResult,
-        stdout: decodeBoundedUtf8(stdoutChunks, stdoutLimit),
-        stderr: decodeBoundedUtf8(stderrChunks, stderrLimit),
-        timedOut,
-        outputLimitExceeded,
-      });
-    };
-
-    const signalProcess = (signal) => {
-      try {
-        if (detached && child.pid) process.kill(-child.pid, signal);
-        else if (child.exitCode === null && child.signalCode === null) child.kill(signal);
-      } catch (error) {
-        if (error?.code !== "ESRCH") throw error;
-      }
-    };
-    const startTermination = () => {
-      if (terminationStarted) return;
-      terminationStarted = true;
-      signalProcess("SIGTERM");
-      forcedTermination = setTimeout(() => {
-        signalProcess("SIGKILL");
-        forcedTermination = undefined;
-        finish();
-      }, terminationGraceMs);
-      forcedTermination.unref();
-    };
-
-    const stopForLimit = () => {
-      if (outputLimitExceeded) return;
-      outputLimitExceeded = true;
-      startTermination();
-    };
-    child.stdout.on("data", (chunk) => {
-      if (appendBounded(stdoutChunks, chunk, stdoutState, stdoutLimit)) stopForLimit();
-    });
-    child.stderr.on("data", (chunk) => {
-      if (appendBounded(stderrChunks, chunk, stderrState, stderrLimit)) stopForLimit();
-    });
-    child.once("error", reject);
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      startTermination();
-    }, timeoutMs);
-    timeout.unref();
-    child.once("close", (exitCode, signal) => {
-      clearTimeout(timeout);
-      closedResult = { exitCode, signal };
-      if (!detached || !terminationStarted) {
-        clearTimeout(forcedTermination);
-        forcedTermination = undefined;
-        finish();
-        return;
-      }
-      try {
-        process.kill(-child.pid, 0);
-        if (forcedTermination === undefined) finish();
-      } catch (error) {
-        if (error?.code !== "ESRCH") {
-          clearTimeout(forcedTermination);
-          forcedTermination = undefined;
-          settled = true;
-          reject(error);
-          return;
-        }
-        clearTimeout(forcedTermination);
-        forcedTermination = undefined;
-        finish();
-      }
-    });
-  });
-}
-
 export async function createBridgeCore(workspace, logger = (line) => console.error(line), options = {}) {
   if (typeof workspace !== "string" || workspace.length === 0) {
     throw new Error("DEVELOPER_BRIDGE_WORKSPACE is required; set it to the authorized project directory");
@@ -300,17 +183,17 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
   }
 
   const testTimeoutMs = options.testTimeoutMs ?? RUN_TESTS_TIMEOUT_MS;
-  const terminationGraceMs = options.terminationGraceMs ?? TERMINATION_GRACE_MS;
+  const terminationGraceMs = options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
   if (!Number.isInteger(testTimeoutMs) || testTimeoutMs <= 0) throw new Error("Test timeout must be a positive integer");
   if (!Number.isInteger(terminationGraceMs) || terminationGraceMs < 0) throw new Error("Termination grace must be a non-negative integer");
 
   async function runGit(args) {
     let result;
     try {
-      result = await runFixedProcess("git", args, {
+      result = await runBoundedProcess("git", args, {
         cwd: root,
         timeoutMs: GIT_TIMEOUT_MS,
-        envOverrides: SAFE_GIT_ENV,
+        env: { ...process.env, ...SAFE_GIT_ENV },
       });
     } catch {
       throw new ToolError("Git could not be started");
@@ -484,7 +367,7 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
       if (args.test !== "default") throw new ToolError('test must be exactly "default"');
       let result;
       try {
-        result = await runFixedProcess(process.execPath, [TEST_SUPERVISOR_PATH], {
+        result = await runBoundedProcess(process.execPath, [TEST_SUPERVISOR_PATH], {
           cwd: root,
           timeoutMs: testTimeoutMs,
           detached: true,

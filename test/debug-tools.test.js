@@ -7,8 +7,28 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { createBridgeCore } from "../src/bridge-core.js";
+import { runBoundedProcess } from "../src/bounded-process.js";
 
 const execFileAsync = promisify(execFile);
+
+test("runBoundedProcess returns structured output for a failing command", async () => {
+  const result = await runBoundedProcess(process.execPath, [
+    "-e",
+    "console.log('OUT'); console.error('ERR'); process.exitCode=7",
+  ], { timeoutMs: 2_000 });
+
+  assert.deepEqual(Object.keys(result).sort(), [
+    "exitCode",
+    "outputLimitExceeded",
+    "signal",
+    "stderr",
+    "stdout",
+    "timedOut",
+  ]);
+  assert.equal(result.exitCode, 7);
+  assert.match(result.stdout, /OUT/);
+  assert.match(result.stderr, /ERR/);
+});
 
 function resultText(result) {
   return result.content[0].text;
