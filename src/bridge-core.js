@@ -180,9 +180,10 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
   }
 
   let root;
+  let rootStat;
   try {
     root = await fs.realpath(path.resolve(workspace));
-    const rootStat = await fs.stat(root);
+    rootStat = await fs.stat(root);
     if (!rootStat.isDirectory()) throw new Error("not-directory");
   } catch {
     throw new Error("DEVELOPER_BRIDGE_WORKSPACE must identify an existing directory");
@@ -193,6 +194,7 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
   const publishTimeoutMs = options.publishTimeoutMs ?? RUN_PUBLISH_TIMEOUT_MS;
   const publishTerminationGraceMs = options.publishTerminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
   const pythonCommand = options.pythonCommand ?? "python3";
+  const beforePythonOpen = options.beforePythonOpen ?? (() => {});
   if (!Number.isInteger(testTimeoutMs) || testTimeoutMs <= 0) throw new Error("Test timeout must be a positive integer");
   if (!Number.isInteger(terminationGraceMs) || terminationGraceMs < 0) throw new Error("Termination grace must be a non-negative integer");
   if (!Number.isInteger(publishTimeoutMs) || publishTimeoutMs <= 0) throw new Error("Publish timeout must be a positive integer");
@@ -202,6 +204,7 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
   if (typeof pythonCommand !== "string" || pythonCommand.length === 0) {
     throw new Error("Python command must be a non-empty string");
   }
+  if (typeof beforePythonOpen !== "function") throw new Error("Python open seam must be a function");
 
   async function runGit(args) {
     let result;
@@ -248,9 +251,10 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
     return { target, canonical, stat };
   }
 
-  async function verifiedPythonFile(relativePath) {
+  async function verifiedPythonRoot(relativePath) {
     let current = root;
-    for (const segment of relativePath.split(path.sep)) {
+    const segments = relativePath.split(path.sep);
+    for (const [index, segment] of segments.entries()) {
       current = path.join(current, segment);
       let componentStat;
       try {
@@ -261,26 +265,37 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
       if (componentStat.isSymbolicLink()) {
         throw new ToolError("Symbolic links are not allowed for Python execution");
       }
+      if (index < segments.length - 1 && !componentStat.isDirectory()) {
+        throw new ToolError("Python path components must identify directories");
+      }
+      if (index === segments.length - 1 && !componentStat.isFile()) {
+        throw new ToolError("Path must identify a file");
+      }
+      if (index === segments.length - 1 && componentStat.nlink > 1) {
+        throw new ToolError("Hard-linked files are not allowed");
+      }
     }
 
-    const { canonical, stat } = await existingTarget(relativePath, "file");
+    await beforePythonOpen();
     let handle;
     try {
-      handle = await fs.open(canonical, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+      handle = await fs.open(
+        root,
+        fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0),
+      );
       const openedStat = await handle.stat();
       if (
-        !openedStat.isFile() ||
-        openedStat.nlink > 1 ||
-        openedStat.dev !== stat.dev ||
-        openedStat.ino !== stat.ino
+        !openedStat.isDirectory() ||
+        openedStat.dev !== rootStat.dev ||
+        openedStat.ino !== rootStat.ino
       ) {
-        throw new ToolError("File changed during security validation");
+        throw new ToolError("Workspace root changed during security validation");
       }
-      return { canonical, handle };
+      return { canonical: lexicalTarget(relativePath), handle };
     } catch (error) {
       await handle?.close().catch(() => {});
       if (error instanceof ToolError) throw error;
-      throw new ToolError("Python file could not be opened safely");
+      throw new ToolError("Workspace root could not be opened safely");
     }
   }
 
@@ -370,7 +385,7 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
   const localPublishTools = createLocalPublishTools({
     root,
     normalizePath: normalizeRelativePath,
-    existingFile: verifiedPythonFile,
+    existingFile: verifiedPythonRoot,
     runProcess: runBoundedProcess,
     timeoutMs: publishTimeoutMs,
     terminationGraceMs: publishTerminationGraceMs,

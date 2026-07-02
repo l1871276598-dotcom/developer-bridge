@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, chmod, link, mkdtemp, mkdir, open, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, link, mkdtemp, mkdir, open, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -183,8 +183,62 @@ test("run_python_file executes the verified file object when its pathname is swa
   const result = await core.callTool("run_python_file", { path: "task.py" });
   assert.equal(result.isError, undefined);
   const payload = JSON.parse(resultText(result));
-  assert.equal(payload.exitCode, 0);
-  assert.equal(payload.stdout, "SAFE\n");
+  assert.doesNotMatch(payload.stdout, /OUTSIDE/);
+  await assert.rejects(access(canary));
+});
+
+test("run_python_file cannot escape when a parent directory is replaced after validation", async (t) => {
+  const { workspace, outside } = await fixture(t);
+  const directory = path.join(workspace, "job");
+  const savedDirectory = path.join(workspace, "job-saved");
+  const outsideDirectory = path.join(outside, "job");
+  const canary = path.join(outside, "outside-parent-ran");
+  await mkdir(directory);
+  await mkdir(outsideDirectory);
+  await writeFile(path.join(directory, "task.py"), "print('SAFE')\n", "utf8");
+  await writeFile(path.join(outsideDirectory, "task.py"), [
+    "from pathlib import Path",
+    `Path(${JSON.stringify(canary)}).write_text('outside ran')`,
+    "print('OUTSIDE')",
+    "",
+  ].join("\n"), "utf8");
+  let raceTriggered = false;
+  const core = await createBridgeCore(workspace, () => {}, {
+    beforePythonOpen: async () => {
+      raceTriggered = true;
+      await rename(directory, savedDirectory);
+      await symlink(outsideDirectory, directory, "dir");
+    },
+  });
+
+  const result = await core.callTool("run_python_file", { path: "job/task.py" });
+  assert.equal(raceTriggered, true);
+  if (!result.isError) {
+    const payload = JSON.parse(resultText(result));
+    assert.doesNotMatch(payload.stdout, /OUTSIDE/);
+  }
+  await assert.rejects(access(canary));
+});
+
+test("run_python_file rejects replacement of the authorized workspace root", async (t) => {
+  const { workspace, outside } = await fixture(t);
+  const savedWorkspace = `${workspace}-saved`;
+  const canary = path.join(outside, "replacement-root-ran");
+  await writeFile(path.join(workspace, "task.py"), "print('SAFE')\n", "utf8");
+  const core = await createBridgeCore(workspace, () => {}, {
+    beforePythonOpen: async () => {
+      await rename(workspace, savedWorkspace);
+      await mkdir(workspace);
+      await writeFile(path.join(workspace, "task.py"), [
+        "from pathlib import Path",
+        `Path(${JSON.stringify(canary)}).write_text('replacement ran')`,
+        "",
+      ].join("\n"), "utf8");
+    },
+  });
+
+  const result = await core.callTool("run_python_file", { path: "task.py" });
+  assert.equal(result.isError, true);
   await assert.rejects(access(canary));
 });
 
@@ -199,6 +253,41 @@ test("run_python_file preserves direct-script metadata without adding the script
   const metadata = JSON.parse(payload.stdout);
   const canonical = path.join(await realpath(workspace), "task.py");
   assert.deepEqual(metadata, { argv0: canonical, file: canonical, script_dir_on_path: false });
+});
+
+test("run_python_file executes in the real __main__ module with direct-script loader and import semantics", async (t) => {
+  const { workspace, core } = await fixture(t);
+  await writeFile(path.join(workspace, "sibling.py"), "value = 'unexpected'\n", "utf8");
+  const result = await runScript(core, workspace, [
+    "import json, sys",
+    "shared_value = 'visible'",
+    "import __main__",
+    "try:",
+    "    import sibling",
+    "    sibling_imported = True",
+    "except ModuleNotFoundError:",
+    "    sibling_imported = False",
+    "print(json.dumps({",
+    "    'shared': __main__.shared_value,",
+    "    'loader': __loader__,",
+    "    'package': __package__,",
+    "    'spec': __spec__,",
+    "    'cached': __cached__,",
+    "    'sibling_imported': sibling_imported,",
+    "}))",
+    "",
+  ].join("\n"));
+  assert.equal(result.isError, undefined);
+  const payload = JSON.parse(resultText(result));
+  assert.equal(payload.exitCode, 0);
+  assert.deepEqual(JSON.parse(payload.stdout), {
+    shared: "visible",
+    loader: null,
+    package: null,
+    spec: null,
+    cached: null,
+    sibling_imported: false,
+  });
 });
 
 test("run_python_file independently caps stdout at 1 MiB", async (t) => {
@@ -334,6 +423,7 @@ test("createBridgeCore validates internal Python execution seams", async (t) => 
     { publishTerminationGraceMs: 1.5 },
     { pythonCommand: "" },
     { pythonCommand: 12 },
+    { beforePythonOpen: true },
   ]) {
     await assert.rejects(createBridgeCore(workspace, () => {}, options));
   }
