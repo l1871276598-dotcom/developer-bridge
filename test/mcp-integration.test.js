@@ -41,7 +41,16 @@ async function prepareWorkspace(workspace) {
 async function exerciseAllTools(mcpClient) {
   const tools = await mcpClient.listTools();
   assert.deepEqual(tools.tools.map(({ name }) => name), [
-    "list_files", "read_file", "write_file", "git_status", "git_diff", "run_tests",
+    "list_files",
+    "read_file",
+    "write_file",
+    "git_stage",
+    "git_commit",
+    "git_push_current_branch",
+    "run_validation",
+    "git_status",
+    "git_diff",
+    "run_tests",
   ]);
   const write = await mcpClient.callTool({
     name: "write_file",
@@ -85,7 +94,7 @@ async function waitForHealth(port) {
   throw new Error("HTTP server did not become healthy");
 }
 
-test("stdio transport scans and runs all six approved tools", async (t) => {
+test("stdio transport scans and runs all ten approved tools", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-stdio-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
   await prepareWorkspace(workspace);
@@ -106,7 +115,7 @@ test("stdio transport scans and runs all six approved tools", async (t) => {
   assert.doesNotMatch(stderr, new RegExp(workspace));
 });
 
-test("HTTP transport scans and runs all six approved tools without leaking route", async (t) => {
+test("HTTP transport scans and runs all ten approved tools without leaking route", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-http-"));
   await prepareWorkspace(workspace);
   const port = await freePort();

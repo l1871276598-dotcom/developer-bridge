@@ -1,3 +1,8 @@
+import {
+  GIT_WRITE_TOOL_DEFINITIONS,
+  handleGitWriteTool,
+  isGitWriteTool,
+} from "./git-write-tools.js";
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { spawn } from "node:child_process";
@@ -63,6 +68,7 @@ const TOOL_DEFINITIONS = Object.freeze([
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
   },
+  ...GIT_WRITE_TOOL_DEFINITIONS,
   {
     name: "git_status",
     description: "Return the short Git status of the authorized local workspace.",
@@ -463,6 +469,10 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
       await writeFileVerified(target, expectedStat, exists, args.content);
       return { relativePath, text: `Wrote ${relativePath} (${contentBytes} bytes)`, contentBytes };
     }
+    if (isGitWriteTool(name)) {
+      return handleGitWriteTool(name, args ?? {});
+    }
+
     if (name === "git_status") {
       assertPlainArguments(args, []);
       const output = await runGit(["status", "--short"]);
