@@ -129,6 +129,7 @@ function run(command, args, options = {}) {
     timeoutMs = TIMEOUT_MS,
     allowedExitCodes = [0],
     envOverrides = {},
+    allowFailure = false,
   } = options;
   if (typeof cwd !== "string" || !cwd) throw new Error("A fixed command cwd is required.");
 
@@ -181,7 +182,7 @@ function run(command, args, options = {}) {
         stderr: clip(stderr),
       };
 
-      if (!allowedExitCodes.includes(exitCode)) {
+      if (!allowFailure && !allowedExitCodes.includes(exitCode)) {
         reject(new Error("Fixed command failed."));
         return;
       }
@@ -439,7 +440,19 @@ async function createDraftPr(args, snapshotValue, runCommand) {
   };
 }
 
-async function validate(snapshotValue) {
+function validationStep(label, result) {
+  return {
+    step: label,
+    exitCode: Number.isInteger(result?.exitCode) ? result.exitCode : null,
+    signal: result?.signal ?? null,
+    stdout: clip(result?.stdout),
+    stderr: clip(result?.stderr),
+    passed: result?.exitCode === 0,
+  };
+}
+
+async function validate(args, snapshotValue, runCommand) {
+  assertPlainArguments(args);
   const snapshot = await assertAuthorized(snapshotValue);
   const branch = snapshot.branch;
   const root = snapshot.root;
@@ -453,20 +466,33 @@ async function validate(snapshotValue) {
     ["git diff --check", "git", ["diff", "--check"]],
     ["git diff --cached --check", "git", ["diff", "--cached", "--check"]],
   ];
+  const results = [];
 
-  const output = [`Validation passed on ${branch}.`];
+  for (const [label, command, commandArgs] of commands) {
+    let result;
+    try {
+      result = await runCommand(command, commandArgs, { cwd: root, allowFailure: true });
+    } catch {
+      const failed = {
+        step: label,
+        exitCode: null,
+        signal: null,
+        stdout: "",
+        stderr: "Validation command could not be started.",
+        passed: false,
+      };
+      results.push(failed);
+      return { text: JSON.stringify({ passed: false, branch, failed_step: label, results }) };
+    }
 
-  for (const [label, command, args] of commands) {
-    const result = await run(command, args, { cwd: root });
-    output.push(
-      "",
-      `=== ${label}: PASS ===`,
-      result.stdout,
-      result.stderr,
-    );
+    const step = validationStep(label, result);
+    results.push(step);
+    if (!step.passed) {
+      return { text: JSON.stringify({ passed: false, branch, failed_step: label, results }) };
+    }
   }
 
-  return { text: output.filter((item) => item !== "").join("\n") };
+  return { text: JSON.stringify({ passed: true, branch, failed_step: null, results }) };
 }
 
 export async function handleGitWriteTool(name, args = {}, snapshot, options = {}) {
@@ -476,6 +502,6 @@ export async function handleGitWriteTool(name, args = {}, snapshot, options = {}
   if (name === "github_pr_create_draft") {
     return createDraftPr(args, snapshot, options.runCommand || run);
   }
-  if (name === "run_validation") return validate(snapshot);
+  if (name === "run_validation") return validate(args, snapshot, options.runCommand || run);
   throw new Error(`Unsupported Git write tool: ${name}`);
 }
