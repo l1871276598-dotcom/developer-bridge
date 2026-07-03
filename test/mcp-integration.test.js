@@ -31,7 +31,7 @@ async function prepareWorkspace(workspace) {
   ].join("\n"), "utf8");
   await writeFile(path.join(workspace, "tracked.txt"), "before\n", "utf8");
   const git = (...args) => execFileAsync("git", args, { cwd: workspace });
-  await git("init", "--quiet");
+  await git("init", "--quiet", "-b", "feat/test");
   await git("config", "user.email", "test@example.invalid");
   await git("config", "user.name", "Developer Bridge Test");
   await git("add", "package.json", "target.test.js", "tracked.txt");
@@ -48,10 +48,21 @@ async function exerciseAllTools(mcpClient) {
     "git_commit",
     "git_push_current_branch",
     "run_validation",
+    "git_branch_list",
+    "git_branch_create",
+    "git_branch_switch",
+    "git_worktree_list",
+    "git_worktree_create",
+    "git_worktree_switch",
     "git_status",
     "git_diff",
     "run_tests",
   ]);
+  const branches = await mcpClient.callTool({ name: "git_branch_list", arguments: {} });
+  assert.deepEqual(JSON.parse(branches.content[0].text).branches.map(({ branch }) => branch), ["feat/test"]);
+  const worktrees = await mcpClient.callTool({ name: "git_worktree_list", arguments: {} });
+  assert.deepEqual(JSON.parse(worktrees.content[0].text).worktrees.map(({ branch }) => branch), ["feat/test"]);
+
   const write = await mcpClient.callTool({
     name: "write_file",
     arguments: { path: "integration.txt", content: "integration body" },
@@ -94,7 +105,7 @@ async function waitForHealth(port) {
   throw new Error("HTTP server did not become healthy");
 }
 
-test("stdio transport scans and runs all ten approved tools", async (t) => {
+test("stdio transport scans and runs all sixteen approved tools", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-stdio-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
   await prepareWorkspace(workspace);
@@ -115,7 +126,7 @@ test("stdio transport scans and runs all ten approved tools", async (t) => {
   assert.doesNotMatch(stderr, new RegExp(workspace));
 });
 
-test("HTTP transport scans and runs all ten approved tools without leaking route", async (t) => {
+test("HTTP transport scans and runs all sixteen approved tools without leaking route", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-http-"));
   await prepareWorkspace(workspace);
   const port = await freePort();

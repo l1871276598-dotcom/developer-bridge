@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
+const execFileAsync = promisify(execFile);
 
-function runServer(script, env, { waitMs = 1000, readyPattern } = {}) {
+async function initializeRepository(workspace) {
+  await execFileAsync("git", ["init", "--quiet", "-b", "feat/test"], { cwd: workspace });
+}
+
+function runServer(script, env, { waitMs = 3000, readyPattern } = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [script], {
       cwd: projectRoot,
@@ -60,6 +66,7 @@ function cleanEnv(overrides = {}) {
   const env = { ...process.env, ...overrides };
   delete env.DEVELOPER_BRIDGE_WORKSPACE;
   delete env.MCP_PATH;
+  delete env.DEVELOPER_BRIDGE_WORKTREE_ROOT;
   return { ...env, ...overrides };
 }
 
@@ -134,13 +141,53 @@ test("HTTP server rejects a workspace that is not an existing directory", async 
   }));
   assert.equal(result.timedOut, false);
   assert.notEqual(result.code, 0);
-  assert.match(result.stderr, /existing directory/);
+  assert.match(result.stderr, /Git repository root|existing directory/i);
+});
+
+
+for (const invalidRoot of ["relative-worktrees", "https://example.invalid/worktrees"]) {
+  test(`HTTP server rejects invalid managed worktree root: ${invalidRoot.split(":")[0]}`, async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-"));
+    try {
+      await initializeRepository(workspace);
+      const result = await runHttpServer(cleanEnv({
+        DEVELOPER_BRIDGE_WORKSPACE: workspace,
+        DEVELOPER_BRIDGE_WORKTREE_ROOT: invalidRoot,
+        MCP_PATH: "mcp-valid",
+      }));
+      assert.equal(result.timedOut, false);
+      assert.notEqual(result.code, 0);
+      assert.match(result.stderr, /worktree root/i);
+      assert.doesNotMatch(result.stderr, new RegExp(invalidRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+}
+
+test("HTTP server rejects a managed worktree root equal to the workspace", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-"));
+  try {
+    await initializeRepository(workspace);
+    const result = await runHttpServer(cleanEnv({
+      DEVELOPER_BRIDGE_WORKSPACE: workspace,
+      DEVELOPER_BRIDGE_WORKTREE_ROOT: workspace,
+      MCP_PATH: "mcp-valid",
+    }));
+    assert.equal(result.timedOut, false);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /worktree root/i);
+    assert.doesNotMatch(result.stderr, new RegExp(workspace.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test("valid HTTP configuration starts without logging workspace or MCP route", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-"));
   const route = "mcp-super-secret";
   try {
+    await initializeRepository(workspace);
     const result = await runHttpServer(
       cleanEnv({
         DEVELOPER_BRIDGE_WORKSPACE: workspace,

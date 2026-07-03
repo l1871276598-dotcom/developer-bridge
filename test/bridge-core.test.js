@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { link, mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 import {
   MAX_FILE_BYTES,
@@ -15,6 +19,7 @@ async function fixture(t) {
   const outside = path.join(base, "outside");
   await mkdir(workspace);
   await mkdir(outside);
+  await execFileAsync("git", ["init", "--quiet", "-b", "feat/test"], { cwd: workspace });
   t.after(() => rm(base, { recursive: true, force: true }));
   const logs = [];
   const core = await createBridgeCore(workspace, (line) => logs.push(line));
@@ -25,7 +30,7 @@ function resultText(result) {
   return result.content[0].text;
 }
 
-test("exposes exactly the ten approved tools with strict object schemas", async (t) => {
+test("exposes exactly the sixteen approved tools with strict object schemas", async (t) => {
   const { core } = await fixture(t);
   assert.deepEqual(core.tools.map(({ name }) => name), [
     "list_files",
@@ -35,6 +40,12 @@ test("exposes exactly the ten approved tools with strict object schemas", async 
     "git_commit",
     "git_push_current_branch",
     "run_validation",
+    "git_branch_list",
+    "git_branch_create",
+    "git_branch_switch",
+    "git_worktree_list",
+    "git_worktree_create",
+    "git_worktree_switch",
     "git_status",
     "git_diff",
     "run_tests",
@@ -180,7 +191,6 @@ test("enforces the UTF-8 byte write limit before changing the target", async (t)
 
 test("rejects protected paths, directories, and missing parent directories", async (t) => {
   const { workspace, core } = await fixture(t);
-  await mkdir(path.join(workspace, ".git"));
   await mkdir(path.join(workspace, "node_modules"));
   await mkdir(path.join(workspace, "directory"));
   for (const target of [
@@ -194,7 +204,6 @@ test("rejects protected paths, directories, and missing parent directories", asy
 
 test("rejects protected paths reached through in-workspace symlink aliases", async (t) => {
   const { workspace, core } = await fixture(t);
-  await mkdir(path.join(workspace, ".git"));
   await writeFile(path.join(workspace, ".env"), "original", "utf8");
   await symlink(path.join(workspace, ".git"), path.join(workspace, "git-alias"), "dir");
   await symlink(path.join(workspace, ".env"), path.join(workspace, "env-alias"), "file");

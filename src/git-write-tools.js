@@ -1,9 +1,21 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_OUTPUT = 200_000;
+const SAFE_GIT_ENV = Object.freeze({
+  GIT_CONFIG_COUNT: "4",
+  GIT_CONFIG_KEY_0: "core.fsmonitor",
+  GIT_CONFIG_VALUE_0: "false",
+  GIT_CONFIG_KEY_1: "core.hooksPath",
+  GIT_CONFIG_VALUE_1: os.devNull,
+  GIT_CONFIG_KEY_2: "commit.gpgSign",
+  GIT_CONFIG_VALUE_2: "false",
+  GIT_CONFIG_KEY_3: "protocol.ext.allow",
+  GIT_CONFIG_VALUE_3: "never",
+});
 
 const WRITE_TOOL_NAMES = new Set([
   "git_stage",
@@ -70,28 +82,16 @@ export function isGitWriteTool(name) {
   return WRITE_TOOL_NAMES.has(name);
 }
 
-function requiredEnv(name) {
-  const value = process.env[name]?.trim();
-  if (!value) throw new Error(`Missing required environment variable: ${name}`);
-  return value;
-}
-
-function workspaceRoot() {
-  const root = fs.realpathSync(requiredEnv("DEVELOPER_BRIDGE_WORKSPACE"));
-  if (!fs.statSync(root).isDirectory()) {
-    throw new Error(`Workspace is not a directory: ${root}`);
+function assertSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") {
+    throw new Error("Missing authorized workspace snapshot.");
   }
-  if (!fs.existsSync(path.join(root, ".git"))) {
-    throw new Error(`Workspace is not a Git repository: ${root}`);
+  for (const key of ["root", "branch", "commonDir"]) {
+    if (typeof snapshot[key] !== "string" || !snapshot[key]) {
+      throw new Error("Invalid authorized workspace snapshot.");
+    }
   }
-  return root;
-}
-
-function allowedBranch() {
-  return (
-    process.env.DEVELOPER_BRIDGE_ALLOWED_BRANCH?.trim() ||
-    "codex/stage-07-learning-loop"
-  );
+  return snapshot;
 }
 
 function clip(value) {
@@ -103,15 +103,16 @@ function clip(value) {
 
 function run(command, args, options = {}) {
   const {
-    cwd = workspaceRoot(),
+    cwd,
     timeoutMs = TIMEOUT_MS,
     allowedExitCodes = [0],
   } = options;
+  if (typeof cwd !== "string" || !cwd) throw new Error("A fixed command cwd is required.");
 
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env: process.env,
+      env: command === "git" ? { ...process.env, ...SAFE_GIT_ENV } : process.env,
       shell: false,
       windowsHide: true,
     });
@@ -157,22 +158,7 @@ function run(command, args, options = {}) {
       };
 
       if (!allowedExitCodes.includes(exitCode)) {
-        const rendered = [command, ...args]
-          .map((part) => JSON.stringify(part))
-          .join(" ");
-        reject(
-          new Error(
-            [
-              `Command failed: ${rendered}`,
-              `Exit code: ${exitCode}`,
-              signal ? `Signal: ${signal}` : "",
-              result.stdout ? `stdout:\n${result.stdout}` : "",
-              result.stderr ? `stderr:\n${result.stderr}` : "",
-            ]
-              .filter(Boolean)
-              .join("\n"),
-          ),
-        );
+        reject(new Error("Fixed command failed."));
         return;
       }
 
@@ -181,40 +167,50 @@ function run(command, args, options = {}) {
   });
 }
 
-function git(args, options = {}) {
-  return run("git", args, { cwd: workspaceRoot(), ...options });
+function git(args, snapshot, options = {}) {
+  return run("git", args, { cwd: snapshot.root, ...options });
 }
 
-async function currentBranch() {
-  const result = await git(["branch", "--show-current"]);
+async function currentBranch(snapshot) {
+  const result = await git(["symbolic-ref", "--quiet", "--short", "HEAD"], snapshot);
   const branch = result.stdout.trim();
   if (!branch) throw new Error("Detached HEAD is not allowed.");
   return branch;
 }
 
-async function assertAuthorized() {
-  const configured = workspaceRoot();
-  const actual = fs.realpathSync(
-    (await git(["rev-parse", "--show-toplevel"])).stdout.trim(),
+async function assertNoExternalFilters(snapshot) {
+  const configured = await git(
+    ["config", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|smudge|process)$"],
+    snapshot,
+    { allowedExitCodes: [0, 1] },
   );
+  if (configured.exitCode === 0 && configured.stdout.trim().length > 0) {
+    throw new Error("External Git filters are not allowed for staging operations.");
+  }
+}
 
-  if (actual !== configured) {
-    throw new Error(
-      `Repository mismatch. Authorized=${configured}; actual=${actual}`,
-    );
+async function assertAuthorized(snapshotValue) {
+  const snapshot = assertSnapshot(snapshotValue);
+  const configured = fs.realpathSync(snapshot.root);
+  const actual = fs.realpathSync(
+    (await git(["rev-parse", "--show-toplevel"], snapshot)).stdout.trim(),
+  );
+  const commonPath = (await git(["rev-parse", "--git-common-dir"], snapshot)).stdout.trim();
+  const commonDir = fs.realpathSync(path.resolve(snapshot.root, commonPath));
+
+  if (actual !== configured || actual !== snapshot.root || commonDir !== snapshot.commonDir) {
+    throw new Error("Repository identity no longer matches the authorized snapshot.");
   }
 
-  const branch = await currentBranch();
-  const allowed = allowedBranch();
-
+  const branch = await currentBranch(snapshot);
   if (branch === "main" || branch === "master") {
     throw new Error(`Protected branch cannot be modified: ${branch}`);
   }
-  if (branch !== allowed) {
-    throw new Error(`Unauthorized branch. Allowed=${allowed}; current=${branch}`);
+  if (branch !== snapshot.branch) {
+    throw new Error("Current branch no longer matches the authorized snapshot.");
   }
 
-  return branch;
+  return snapshot;
 }
 
 const FORBIDDEN = [
@@ -273,17 +269,19 @@ function safePath(root, supplied) {
   return gitPath;
 }
 
-async function stage(args) {
-  const branch = await assertAuthorized();
-  const root = workspaceRoot();
+async function stage(args, snapshotValue) {
+  const snapshot = await assertAuthorized(snapshotValue);
+  const branch = snapshot.branch;
+  const root = snapshot.root;
 
   if (!Array.isArray(args.paths) || args.paths.length === 0) {
     throw new Error("git_stage requires a non-empty paths array.");
   }
 
   const paths = [...new Set(args.paths.map((item) => safePath(root, item)))];
-  await git(["add", "--", ...paths]);
-  const status = await git(["status", "--short"]);
+  await assertNoExternalFilters(snapshot);
+  await git(["add", "--", ...paths], snapshot);
+  const status = await git(["status", "--short"], snapshot);
 
   return {
     text: [
@@ -296,8 +294,9 @@ async function stage(args) {
   };
 }
 
-async function commit(args) {
-  const branch = await assertAuthorized();
+async function commit(args, snapshotValue) {
+  const snapshot = await assertAuthorized(snapshotValue);
+  const branch = snapshot.branch;
   const message = String(args.message ?? "").trim();
 
   if (!message) throw new Error("Commit message cannot be empty.");
@@ -308,6 +307,7 @@ async function commit(args) {
 
   const staged = await git(
     ["diff", "--cached", "--quiet", "--exit-code"],
+    snapshot,
     { allowedExitCodes: [0, 1] },
   );
 
@@ -315,9 +315,9 @@ async function commit(args) {
     throw new Error("No staged changes are available to commit.");
   }
 
-  await git(["diff", "--cached", "--check"]);
-  const result = await git(["commit", "-m", message]);
-  const head = (await git(["rev-parse", "HEAD"])).stdout.trim();
+  await git(["diff", "--cached", "--check"], snapshot);
+  const result = await git(["commit", "--no-verify", "--no-gpg-sign", "-m", message], snapshot);
+  const head = (await git(["rev-parse", "HEAD"], snapshot)).stdout.trim();
 
   return {
     text: [
@@ -332,18 +332,20 @@ async function commit(args) {
   };
 }
 
-async function push() {
-  const branch = await assertAuthorized();
-  const remote = (await git(["remote", "get-url", "origin"])).stdout.trim();
+async function push(snapshotValue) {
+  const snapshot = await assertAuthorized(snapshotValue);
+  const branch = snapshot.branch;
+  const remote = (await git(["remote", "get-url", "origin"], snapshot)).stdout.trim();
 
   if (!remote) throw new Error("Remote origin is not configured.");
 
   const result = await git([
     "push",
+    "--no-verify",
     "--porcelain",
     "origin",
     `HEAD:refs/heads/${branch}`,
-  ]);
+  ], snapshot);
 
   return {
     text: [
@@ -356,9 +358,10 @@ async function push() {
   };
 }
 
-async function validate() {
-  const branch = await assertAuthorized();
-  const root = workspaceRoot();
+async function validate(snapshotValue) {
+  const snapshot = await assertAuthorized(snapshotValue);
+  const branch = snapshot.branch;
+  const root = snapshot.root;
   const directories = ["src", "tests", "tools"].filter((item) =>
     fs.existsSync(path.join(root, item)),
   );
@@ -385,10 +388,10 @@ async function validate() {
   return { text: output.filter((item) => item !== "").join("\n") };
 }
 
-export async function handleGitWriteTool(name, args = {}) {
-  if (name === "git_stage") return stage(args);
-  if (name === "git_commit") return commit(args);
-  if (name === "git_push_current_branch") return push();
-  if (name === "run_validation") return validate();
+export async function handleGitWriteTool(name, args = {}, snapshot) {
+  if (name === "git_stage") return stage(args, snapshot);
+  if (name === "git_commit") return commit(args, snapshot);
+  if (name === "git_push_current_branch") return push(snapshot);
+  if (name === "run_validation") return validate(snapshot);
   throw new Error(`Unsupported Git write tool: ${name}`);
 }

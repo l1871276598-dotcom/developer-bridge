@@ -1,8 +1,14 @@
 import {
+  GIT_BRANCH_WORKTREE_TOOL_DEFINITIONS,
+  handleGitBranchWorktreeTool,
+  isGitBranchWorktreeTool,
+} from "./git-branch-worktree-tools.js";
+import {
   GIT_WRITE_TOOL_DEFINITIONS,
   handleGitWriteTool,
   isGitWriteTool,
 } from "./git-write-tools.js";
+import { createWorkspaceContext } from "./workspace-context.js";
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { spawn } from "node:child_process";
@@ -19,11 +25,15 @@ const TERMINATION_GRACE_MS = 2 * 1000;
 const TEST_SUPERVISOR_PATH = fileURLToPath(new URL("./test-supervisor.js", import.meta.url));
 const SAFE_GIT_ENV = Object.freeze({
   GIT_OPTIONAL_LOCKS: "0",
-  GIT_CONFIG_NOSYSTEM: "1",
-  GIT_CONFIG_GLOBAL: os.devNull,
-  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_COUNT: "4",
   GIT_CONFIG_KEY_0: "core.fsmonitor",
   GIT_CONFIG_VALUE_0: "false",
+  GIT_CONFIG_KEY_1: "core.hooksPath",
+  GIT_CONFIG_VALUE_1: os.devNull,
+  GIT_CONFIG_KEY_2: "commit.gpgSign",
+  GIT_CONFIG_VALUE_2: "false",
+  GIT_CONFIG_KEY_3: "protocol.ext.allow",
+  GIT_CONFIG_VALUE_3: "never",
 });
 
 const WRITE_DENYLIST = Object.freeze({
@@ -69,6 +79,7 @@ const TOOL_DEFINITIONS = Object.freeze([
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
   },
   ...GIT_WRITE_TOOL_DEFINITIONS,
+  ...GIT_BRANCH_WORKTREE_TOOL_DEFINITIONS,
   {
     name: "git_status",
     description: "Return the short Git status of the authorized local workspace.",
@@ -296,21 +307,16 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
     throw new Error("DEVELOPER_BRIDGE_WORKSPACE is required; set it to the authorized project directory");
   }
 
-  let root;
-  try {
-    root = await fs.realpath(path.resolve(workspace));
-    const rootStat = await fs.stat(root);
-    if (!rootStat.isDirectory()) throw new Error("not-directory");
-  } catch {
-    throw new Error("DEVELOPER_BRIDGE_WORKSPACE must identify an existing directory");
-  }
+  const workspaceContext = options.workspaceContext || await createWorkspaceContext(workspace, {
+    managedRoot: options.managedRoot ?? process.env.DEVELOPER_BRIDGE_WORKTREE_ROOT,
+  });
 
   const testTimeoutMs = options.testTimeoutMs ?? RUN_TESTS_TIMEOUT_MS;
   const terminationGraceMs = options.terminationGraceMs ?? TERMINATION_GRACE_MS;
   if (!Number.isInteger(testTimeoutMs) || testTimeoutMs <= 0) throw new Error("Test timeout must be a positive integer");
   if (!Number.isInteger(terminationGraceMs) || terminationGraceMs < 0) throw new Error("Termination grace must be a non-negative integer");
 
-  async function runGit(args) {
+  async function runGit(args, root) {
     let result;
     try {
       result = await runFixedProcess("git", args, {
@@ -332,14 +338,14 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
     return result.stdout;
   }
 
-  function lexicalTarget(relativePath) {
+  function lexicalTarget(relativePath, root) {
     const target = path.resolve(root, relativePath);
     if (!isContained(root, target)) throw new ToolError("Path must stay inside the authorized workspace");
     return target;
   }
 
-  async function existingTarget(relativePath, expected) {
-    const target = lexicalTarget(relativePath);
+  async function existingTarget(relativePath, expected, root) {
+    const target = lexicalTarget(relativePath, root);
     let canonical;
     let stat;
     try {
@@ -355,9 +361,9 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
     return { target, canonical, stat };
   }
 
-  async function writableTarget(relativePath) {
+  async function writableTarget(relativePath, root) {
     assertWriteAllowed(relativePath);
-    const target = lexicalTarget(relativePath);
+    const target = lexicalTarget(relativePath, root);
     try {
       const canonical = await fs.realpath(target);
       if (!isContained(root, canonical)) throw new ToolError("Symbolic link escapes the authorized workspace");
@@ -438,12 +444,13 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
     }
   }
 
-  async function invoke(name, args, onValidatedPath) {
+  async function invoke(name, args, onValidatedPath, snapshot) {
+    const root = snapshot.root;
     if (name === "list_files") {
       assertPlainArguments(args, ["path"]);
       const relativePath = normalizeRelativePath(args.path, true);
       onValidatedPath(relativePath);
-      const { canonical } = await existingTarget(relativePath, "directory");
+      const { canonical } = await existingTarget(relativePath, "directory", root);
       const entries = await fs.readdir(canonical, { withFileTypes: true });
       return {
         relativePath,
@@ -454,7 +461,7 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
       assertPlainArguments(args, ["path"], ["path"]);
       const relativePath = normalizeRelativePath(args.path);
       onValidatedPath(relativePath);
-      const { canonical, stat } = await existingTarget(relativePath, "file");
+      const { canonical, stat } = await existingTarget(relativePath, "file", root);
       const text = await readFileVerified(canonical, stat);
       return { relativePath, text, contentBytes: Buffer.byteLength(text, "utf8") };
     }
@@ -465,17 +472,21 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
       if (typeof args.content !== "string") throw new ToolError("Content must be a UTF-8 string");
       const contentBytes = Buffer.byteLength(args.content, "utf8");
       if (contentBytes > MAX_FILE_BYTES) throw new ToolError(`Content exceeds the ${MAX_FILE_BYTES}-byte size limit`);
-      const { target, expectedStat, exists } = await writableTarget(relativePath);
+      const { target, expectedStat, exists } = await writableTarget(relativePath, root);
       await writeFileVerified(target, expectedStat, exists, args.content);
       return { relativePath, text: `Wrote ${relativePath} (${contentBytes} bytes)`, contentBytes };
     }
     if (isGitWriteTool(name)) {
-      return handleGitWriteTool(name, args ?? {});
+      return handleGitWriteTool(name, args ?? {}, snapshot);
+    }
+
+    if (isGitBranchWorktreeTool(name)) {
+      return handleGitBranchWorktreeTool(name, args ?? {}, workspaceContext);
     }
 
     if (name === "git_status") {
       assertPlainArguments(args, []);
-      const output = await runGit(["status", "--short"]);
+      const output = await runGit(["status", "--short"], root);
       return { text: output.length === 0 ? "clean" : output };
     }
     if (name === "git_diff") {
@@ -486,7 +497,7 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
       const gitArgs = args.staged === true
         ? ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color"]
         : ["diff", "--no-ext-diff", "--no-textconv", "--no-color"];
-      const output = await runGit(gitArgs);
+      const output = await runGit(gitArgs, root);
       return { text: output.length === 0 ? "no diff" : output };
     }
     if (name === "run_tests") {
@@ -514,13 +525,17 @@ export async function createBridgeCore(workspace, logger = (line) => console.err
       const started = performance.now();
       let relativePath;
       try {
-        const result = await invoke(name, args, (validatedPath) => {
-          relativePath = validatedPath;
+        const result = await workspaceContext.runExclusive(async () => {
+          const snapshot = workspaceContext.snapshot();
+          return invoke(name, args, (validatedPath) => {
+            relativePath = validatedPath;
+          }, snapshot);
         });
         relativePath = result.relativePath;
         const fields = [new Date().toISOString(), `tool=${displayPath(name)}`];
         if (relativePath !== undefined) fields.push(`path=${displayPath(relativePath)}`);
         if (result.contentBytes !== undefined) fields.push(`content_bytes=${result.contentBytes}`);
+        if (result.auditBranch !== undefined) fields.push(`branch=${displayPath(result.auditBranch)}`);
         fields.push("result=success", `duration_ms=${Math.round(performance.now() - started)}`);
         logger(fields.join(" "));
         return toolResult(result.text);
