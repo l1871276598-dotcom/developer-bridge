@@ -16,6 +16,23 @@ const SAFE_GIT_ENV = Object.freeze({
   GIT_TERMINAL_PROMPT: "0",
 });
 
+function blockedTransportKey(key) {
+  return (
+    key === "core.askpass" ||
+    key === "core.gitproxy" ||
+    key === "core.sshcommand" ||
+    key === "credential.helper" ||
+    key.startsWith("http.") ||
+    key === "remote.origin.proxy" ||
+    key === "remote.origin.receivepack" ||
+    key === "remote.origin.uploadpack" ||
+    (key.startsWith("credential.") && key.endsWith(".helper")) ||
+    (key.startsWith("url.") && (
+      key.endsWith(".insteadof") || key.endsWith(".pushinsteadof")
+    ))
+  );
+}
+
 export function runFixedGit(command, args, { cwd, allowedExitCodes = [0] } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -79,4 +96,18 @@ export function runFixedGit(command, args, { cwd, allowedExitCodes = [0] } = {})
         : reject(new Error("Fixed Git command failed."));
     });
   });
+}
+
+export async function assertNoRepositoryTransportOverrides(root) {
+  const configured = await runFixedGit(
+    "git",
+    ["config", "--local", "--name-only", "--list"],
+    { cwd: root },
+  );
+  const blocked = configured.stdout
+    .split(/\r?\n/u)
+    .map((key) => key.trim().toLowerCase())
+    .filter(Boolean)
+    .find(blockedTransportKey);
+  if (blocked) throw new Error("Repository Git transport overrides are not allowed.");
 }

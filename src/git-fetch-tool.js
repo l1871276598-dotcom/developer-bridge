@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { runFixedGit } from "./fixed-git-runner.js";
+import {
+  assertNoRepositoryTransportOverrides,
+  runFixedGit,
+} from "./fixed-git-runner.js";
 
 export const GIT_FETCH_TOOL_DEFINITIONS = Object.freeze([
   {
@@ -53,6 +56,7 @@ async function assertSafeContext(root) {
   if (!/^https:\/\/github\.com\/[^/\s]+\/[^/\s]+(?:\.git)?$/u.test(remote)) {
     throw new Error("A GitHub HTTPS origin is required.");
   }
+  await assertNoRepositoryTransportOverrides(canonical);
   return { root: canonical, branch };
 }
 

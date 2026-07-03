@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { assertNoRepositoryTransportOverrides } from "./fixed-git-runner.js";
+
 const TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_OUTPUT = 200_000;
 const SAFE_GIT_ENV = Object.freeze({
@@ -353,6 +355,7 @@ async function commit(args, snapshotValue) {
 async function push(snapshotValue) {
   const snapshot = await assertAuthorized(snapshotValue);
   const branch = snapshot.branch;
+  await assertNoRepositoryTransportOverrides(snapshot.root);
   const remote = (await git(["remote", "get-url", "origin"], snapshot)).stdout.trim();
 
   if (!remote) throw new Error("Remote origin is not configured.");
@@ -389,6 +392,7 @@ async function createDraftPr(args, snapshotValue, runCommand) {
   assertPlainArguments(args);
   const snapshot = await assertAuthorized(snapshotValue);
   const branch = snapshot.branch;
+  await assertNoRepositoryTransportOverrides(snapshot.root);
   const status = await git(["status", "--porcelain=v1", "-z"], snapshot);
   if (status.stdout.length !== 0) throw new Error("Git workspace must be clean before creating a Draft PR.");
 
