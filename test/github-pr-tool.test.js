@@ -119,3 +119,33 @@ test("rejects unexpected arguments, dirty state, unpushed commits, and non-GitHu
     /GitHub origin/i,
   );
 });
+
+test("first push establishes the same-branch origin upstream required by Draft PR creation", async (t) => {
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "developer-bridge-push-")));
+  const workspace = path.join(base, "workspace");
+  const remote = path.join(base, "remote.git");
+  await mkdir(workspace);
+  await mkdir(remote);
+  t.after(() => rm(base, { recursive: true, force: true }));
+
+  await git(remote, "init", "--quiet", "--bare");
+  await git(workspace, "init", "--quiet", "-b", "feat/new");
+  await git(workspace, "config", "user.name", "Test User");
+  await git(workspace, "config", "user.email", "test@example.invalid");
+  await writeFile(path.join(workspace, "README.md"), "fixture\n", "utf8");
+  await git(workspace, "add", "README.md");
+  await git(workspace, "commit", "--quiet", "-m", "fixture");
+  await git(workspace, "remote", "add", "origin", remote);
+
+  const context = await createWorkspaceContext(workspace);
+  await handleGitWriteTool("git_push_current_branch", {}, context.snapshot());
+
+  const upstream = await git(
+    workspace,
+    "rev-parse",
+    "--abbrev-ref",
+    "--symbolic-full-name",
+    "@{upstream}",
+  );
+  assert.equal(upstream.stdout.trim(), "origin/feat/new");
+});

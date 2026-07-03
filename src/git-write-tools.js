@@ -359,6 +359,7 @@ async function push(snapshotValue) {
 
   const result = await git([
     "push",
+    "--set-upstream",
     "--no-verify",
     "--porcelain",
     "origin",
