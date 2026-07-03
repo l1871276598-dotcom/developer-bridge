@@ -1,6 +1,6 @@
 # Developer Bridge
 
-Developer Bridge connects ChatGPT to one explicitly authorized local Git project through a small, auditable MCP bridge. It supports protected file editing, fixed validation, controlled Git publishing, controlled Draft PR creation, controlled origin/main synchronization, and controlled branch/worktree changes without arbitrary Shell, Git, or GitHub CLI arguments.
+Developer Bridge connects ChatGPT to one explicitly authorized local Git project through a small, auditable MCP bridge. It supports protected file editing, fixed validation, controlled Git publishing, controlled Draft PR creation, green-only squash merging, controlled origin/main synchronization, and controlled branch/worktree changes without arbitrary Shell, Git, or GitHub CLI arguments.
 
 ## Architecture
 
@@ -25,8 +25,11 @@ Choose a single Git project as the authorized workspace and replace the placehol
 
 ```bash
 export DEVELOPER_BRIDGE_WORKSPACE="..."
+export DEVELOPER_BRIDGE_OPERATOR_ID="local-operator"
 export MCP_PATH="mcp-..."
 ```
+
+`DEVELOPER_BRIDGE_OPERATOR_ID` is required for HTTP and stdio startup. It accepts 1–64 ASCII letters, digits, dots, underscores, or hyphens. The Bridge reads it once at startup, records it in tool audit logs as `operator_id`, and records the fixed `operator_type=local-human`. MCP tool arguments cannot change this startup value.
 
 The workspace must be the real top-level directory of a repository on an attached branch other than `main` or `master`. `DEVELOPER_BRIDGE_WORKSPACE` should be restricted to a single project. Do not commit the secret local path or other secrets. `MCP_PATH` is a single private path segment, not a complete URL, and must not be hard-coded in the repository.
 
@@ -38,7 +41,7 @@ export DEVELOPER_BRIDGE_WORKTREE_ROOT="..."
 
 The managed root must differ from the workspace and must not traverse a symbolic link. Tool callers cannot supply worktree paths: the Bridge derives each target as `<managed-root>/<branch-with-slashes-replaced-by-->`.
 
-The Draft PR tool requires the GitHub CLI (`gh`) to be installed and already authenticated for `github.com`. Authentication is never requested interactively by the Bridge.
+The GitHub PR tools require the GitHub CLI (`gh`) to be installed and already authenticated for `github.com`. Authentication is never requested interactively by the Bridge.
 
 ## Start and connect
 
@@ -68,7 +71,7 @@ For a local MCP client that uses stdio instead of HTTP, run:
 npm run start:stdio
 ```
 
-The stdio service requires `DEVELOPER_BRIDGE_WORKSPACE` but does not use `MCP_PATH`.
+The stdio service requires `DEVELOPER_BRIDGE_WORKSPACE` and `DEVELOPER_BRIDGE_OPERATOR_ID` but does not use `MCP_PATH`.
 
 ## Current tools
 
@@ -88,6 +91,7 @@ Explicit Git and GitHub publishing tools:
 - `git_commit`: create a normal one-line commit from already staged changes on the authorized branch.
 - `git_push_current_branch`: push only the current authorized non-protected branch to the same branch on `origin`.
 - `github_pr_create_draft`: create a GitHub Draft PR using fixed `gh pr create --draft --fill` arguments only. The current branch must be clean, track `origin/<same-branch>`, and exactly match its pushed remote-tracking commit.
+- `github_pr_merge_squash_if_green`: inspect the current branch PR and squash-merge it only when the worktree is clean, the branch is fully pushed, the PR head exactly matches local `HEAD`, at least one CI check exists, every reported check succeeds, and GitHub reports a clean merge state. A green Draft PR is marked Ready and fully rechecked before merging.
 
 Controlled synchronization tools:
 
@@ -106,7 +110,9 @@ Controlled branch and worktree tools:
 
 ## Safety boundary
 
-- No delete, prune, move, rebase, tag, reset, clean, force, PR merge, PR close, or Ready-for-review operations.
+- Startup fails closed when `DEVELOPER_BRIDGE_OPERATOR_ID` is missing or invalid.
+- No delete, prune, move, rebase, tag, reset, clean, force push, PR close, or branch deletion operations.
+- PR merging is limited to the current branch PR, fixed squash mode, an exact pushed head commit, at least one successful CI check, and a clean GitHub merge state; there is no admin, auto-merge, bypass, arbitrary PR number, or caller-selected merge method.
 - No detached `HEAD`, and no authorization or mutation of `main` or `master`.
 - Branch/worktree switching requires a clean tracked and untracked state and no merge, rebase, cherry-pick, revert, or bisect in progress.
 - Fetch is fixed to HTTPS GitHub `origin/main`; merge is fixed to `origin/main` into the current authorized feature branch.

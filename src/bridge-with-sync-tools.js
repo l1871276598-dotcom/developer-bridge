@@ -1,7 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { createOperatorAuditLogger } from "./audit-actor.js";
 import { createBridgeCore } from "./bridge-core.js";
+import {
+  GITHUB_PR_MERGE_TOOL_DEFINITIONS,
+  handleGitHubPrMergeTool,
+  isGitHubPrMergeTool,
+} from "./github-pr-merge-tool.js";
 import {
   GIT_MERGE_TOOL_DEFINITIONS,
   handleGitMergeTool,
@@ -38,8 +44,10 @@ async function repositoryIdentity(root) {
   };
 }
 
-export async function createBridgeWithSyncTools(workspace, logger) {
-  const core = await createBridgeCore(workspace, logger);
+export async function createBridgeWithSyncTools(workspace, logger, options = {}) {
+  const baseLogger = logger ?? ((line) => console.error(line));
+  const auditLogger = createOperatorAuditLogger(baseLogger, options.operatorIdentity);
+  const core = await createBridgeCore(workspace, auditLogger);
   const identity = await repositoryIdentity(workspace);
   const fetchTool = GIT_SYNC_TOOL_DEFINITIONS.find(({ name }) => name === "git_fetch_origin_main");
   let activeRoot = identity.root;
@@ -78,20 +86,23 @@ export async function createBridgeWithSyncTools(workspace, logger) {
       ...core.tools,
       fetchTool,
       ...GIT_MERGE_TOOL_DEFINITIONS,
+      ...GITHUB_PR_MERGE_TOOL_DEFINITIONS,
     ]),
     callTool(name, args = {}) {
       return serialize(async () => {
-        if (name === "git_fetch_origin_main" || isGitMergeTool(name)) {
+        if (name === "git_fetch_origin_main" || isGitMergeTool(name) || isGitHubPrMergeTool(name)) {
           const started = Date.now();
           try {
             await assertActiveIdentity();
             const result = name === "git_fetch_origin_main"
               ? await handleGitSyncTool(name, args, activeRoot)
-              : await handleGitMergeTool(name, args, activeRoot);
-            logger?.(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
+              : isGitMergeTool(name)
+                ? await handleGitMergeTool(name, args, activeRoot)
+                : await handleGitHubPrMergeTool(name, args, activeRoot);
+            auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
             return textResult(result.text);
           } catch {
-            logger?.(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
+            auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
             return failureResult();
           }
         }
