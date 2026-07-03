@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
 const execFileAsync = promisify(execFile);
+const TEST_OPERATOR_ID = "test.operator";
 
 async function initializeRepository(workspace) {
   await execFileAsync("git", ["init", "--quiet", "-b", "feat/test"], { cwd: workspace });
@@ -63,11 +64,22 @@ function runHttpServer(env, options) {
 }
 
 function cleanEnv(overrides = {}) {
-  const env = { ...process.env, ...overrides };
+  const env = { ...process.env };
   delete env.DEVELOPER_BRIDGE_WORKSPACE;
   delete env.MCP_PATH;
   delete env.DEVELOPER_BRIDGE_WORKTREE_ROOT;
-  return { ...env, ...overrides };
+  delete env.DEVELOPER_BRIDGE_OPERATOR_ID;
+  return {
+    ...env,
+    DEVELOPER_BRIDGE_OPERATOR_ID: TEST_OPERATOR_ID,
+    ...overrides,
+  };
+}
+
+function withoutOperator(env) {
+  const copy = { ...env };
+  delete copy.DEVELOPER_BRIDGE_OPERATOR_ID;
+  return copy;
 }
 
 test("HTTP server rejects a missing workspace without leaking the route", async () => {
@@ -90,6 +102,43 @@ test("HTTP server rejects a missing MCP_PATH", async () => {
     assert.equal(result.timedOut, false);
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /MCP_PATH/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("HTTP server rejects a missing operator identity", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-"));
+  try {
+    await initializeRepository(workspace);
+    const result = await runHttpServer(withoutOperator(cleanEnv({
+      DEVELOPER_BRIDGE_WORKSPACE: workspace,
+      MCP_PATH: "mcp-valid",
+    })));
+
+    assert.equal(result.timedOut, false);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /DEVELOPER_BRIDGE_OPERATOR_ID/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("HTTP server rejects an invalid operator identity without echoing it", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-"));
+  const invalid = "forged operator";
+  try {
+    await initializeRepository(workspace);
+    const result = await runHttpServer(cleanEnv({
+      DEVELOPER_BRIDGE_WORKSPACE: workspace,
+      DEVELOPER_BRIDGE_OPERATOR_ID: invalid,
+      MCP_PATH: "mcp-valid",
+    }));
+
+    assert.equal(result.timedOut, false);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /DEVELOPER_BRIDGE_OPERATOR_ID/);
+    assert.doesNotMatch(result.stderr, new RegExp(invalid));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -134,6 +183,21 @@ test("stdio server rejects a missing workspace instead of using cwd", async () =
   assert.match(result.stderr, /DEVELOPER_BRIDGE_WORKSPACE/);
 });
 
+test("stdio server rejects a missing operator identity", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-"));
+  try {
+    await initializeRepository(workspace);
+    const result = await runServer("server.js", withoutOperator(cleanEnv({
+      DEVELOPER_BRIDGE_WORKSPACE: workspace,
+    })));
+    assert.equal(result.timedOut, false);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /DEVELOPER_BRIDGE_OPERATOR_ID/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("HTTP server rejects a workspace that is not an existing directory", async () => {
   const result = await runHttpServer(cleanEnv({
     DEVELOPER_BRIDGE_WORKSPACE: path.join(os.tmpdir(), "developer-bridge-does-not-exist"),
@@ -143,7 +207,6 @@ test("HTTP server rejects a workspace that is not an existing directory", async 
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /Git repository root|existing directory/i);
 });
-
 
 for (const invalidRoot of ["relative-worktrees", "https://example.invalid/worktrees"]) {
   test(`HTTP server rejects invalid managed worktree root: ${invalidRoot.split(":")[0]}`, async () => {

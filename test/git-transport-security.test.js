@@ -11,6 +11,7 @@ import { createBridgeCore } from "../src/bridge-core.js";
 import { createBridgeWithSyncTools } from "../src/bridge-with-sync-tools.js";
 
 const execFileAsync = promisify(execFile);
+const OPERATOR_IDENTITY = Object.freeze({ id: "transport.test", type: "local-human" });
 
 async function git(cwd, ...args) {
   return execFileAsync("git", args, { cwd });
@@ -68,7 +69,9 @@ test("git fetch rejects repository-configured HTTP proxies before network access
   await git(workspace, "remote", "add", "origin", "https://github.com/example/repository.git");
   await git(workspace, "config", "http.proxy", `http://127.0.0.1:${address.port}`);
 
-  const bridge = await createBridgeWithSyncTools(workspace, () => {});
+  const bridge = await createBridgeWithSyncTools(workspace, () => {}, {
+    operatorIdentity: OPERATOR_IDENTITY,
+  });
   const result = await bridge.callTool("git_fetch_origin_main", {});
 
   assert.equal(result.isError, true);

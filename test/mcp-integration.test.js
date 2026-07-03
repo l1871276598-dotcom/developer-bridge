@@ -11,31 +11,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
+import { REQUIRED_TOOL_NAMES } from "../src/controlled-engineering-tools.js";
+
 const projectRoot = path.resolve(import.meta.dirname, "..");
 const execFileAsync = promisify(execFile);
-
-const APPROVED_TOOLS = [
-  "list_files",
-  "read_file",
-  "write_file",
-  "git_stage",
-  "git_commit",
-  "git_push_current_branch",
-  "github_pr_create_draft",
-  "run_validation",
-  "git_branch_list",
-  "git_branch_create",
-  "git_branch_switch",
-  "git_worktree_list",
-  "git_worktree_create",
-  "git_worktree_switch",
-  "git_status",
-  "git_diff",
-  "run_tests",
-  "git_fetch_origin_main",
-  "git_merge_origin_main",
-  "git_merge_abort",
-];
+const OPERATOR_ID = "integration.operator";
+const APPROVED_TOOLS = REQUIRED_TOOL_NAMES;
+const CAPABILITY_PROFILE = "controlled-engineering-v1";
 
 function client() {
   return new Client({ name: "p0-integration-test", version: "1.0.0" }, { capabilities: {} });
@@ -69,6 +51,14 @@ async function exerciseAllTools(mcpClient) {
   const worktrees = await mcpClient.callTool({ name: "git_worktree_list", arguments: {} });
   assert.deepEqual(JSON.parse(worktrees.content[0].text).worktrees.map(({ branch }) => branch), ["feat/test"]);
 
+  const createDirectory = await mcpClient.callTool({
+    name: "create_directory",
+    arguments: { path: ".github/workflows", recursive: true },
+  });
+  assert.equal(createDirectory.isError, undefined);
+  const pathStat = await mcpClient.callTool({ name: "path_stat", arguments: { path: ".github/workflows" } });
+  assert.equal(JSON.parse(pathStat.content[0].text).type, "directory");
+
   const write = await mcpClient.callTool({
     name: "write_file",
     arguments: { path: "integration.txt", content: "integration body" },
@@ -76,6 +66,7 @@ async function exerciseAllTools(mcpClient) {
   assert.equal(write.isError, undefined);
   const read = await mcpClient.callTool({ name: "read_file", arguments: { path: "integration.txt" } });
   assert.equal(read.content[0].text, "integration body");
+  assert.doesNotMatch(read.content[0].text, new RegExp(OPERATOR_ID));
   const list = await mcpClient.callTool({ name: "list_files", arguments: { path: "." } });
   assert.match(list.content[0].text, /FILE integration\.txt/);
   const trackedWrite = await mcpClient.callTool({
@@ -87,6 +78,8 @@ async function exerciseAllTools(mcpClient) {
   assert.match(status.content[0].text, / M tracked\.txt/);
   const diff = await mcpClient.callTool({ name: "git_diff", arguments: { staged: false } });
   assert.match(diff.content[0].text, /\+after/);
+  const context = await mcpClient.callTool({ name: "git_context", arguments: {} });
+  assert.equal(JSON.parse(context.content[0].text).branch, "feat/test");
   const tests = await mcpClient.callTool({ name: "run_tests", arguments: { test: "default" } });
   assert.equal(JSON.parse(tests.content[0].text).exitCode, 0);
 }
@@ -111,7 +104,7 @@ async function waitForHealth(port) {
   throw new Error("HTTP server did not become healthy");
 }
 
-test("stdio transport scans and runs all twenty approved tools", async (t) => {
+test("stdio transport scans and runs all fifty-one approved tools", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-stdio-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
   await prepareWorkspace(workspace);
@@ -119,7 +112,12 @@ test("stdio transport scans and runs all twenty approved tools", async (t) => {
     command: process.execPath,
     args: ["server.js"],
     cwd: projectRoot,
-    env: { ...process.env, DEVELOPER_BRIDGE_WORKSPACE: workspace },
+    env: {
+      ...process.env,
+      DEVELOPER_BRIDGE_OPERATOR_ID: OPERATOR_ID,
+      DEVELOPER_BRIDGE_WORKSPACE: workspace,
+      DEVELOPER_BRIDGE_CAPABILITY_PROFILE: CAPABILITY_PROFILE,
+    },
     stderr: "pipe",
   });
   let stderr = "";
@@ -128,11 +126,12 @@ test("stdio transport scans and runs all twenty approved tools", async (t) => {
   t.after(() => mcpClient.close());
   await mcpClient.connect(transport);
   await exerciseAllTools(mcpClient);
+  assert.match(stderr, /operator_id=integration\.operator operator_type=local-human/);
   assert.doesNotMatch(stderr, /integration body/);
   assert.doesNotMatch(stderr, new RegExp(workspace));
 });
 
-test("HTTP transport scans and runs all twenty approved tools without leaking route", async (t) => {
+test("HTTP transport scans and runs all fifty-one approved tools without leaking route", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-http-"));
   await prepareWorkspace(workspace);
   const port = await freePort();
@@ -141,7 +140,9 @@ test("HTTP transport scans and runs all twenty approved tools without leaking ro
     cwd: projectRoot,
     env: {
       ...process.env,
+      DEVELOPER_BRIDGE_OPERATOR_ID: OPERATOR_ID,
       DEVELOPER_BRIDGE_WORKSPACE: workspace,
+      DEVELOPER_BRIDGE_CAPABILITY_PROFILE: CAPABILITY_PROFILE,
       DEVELOPER_BRIDGE_PORT: String(port),
       MCP_PATH: route,
     },
@@ -166,6 +167,7 @@ test("HTTP transport scans and runs all twenty approved tools without leaking ro
   mcpClient = client();
   await mcpClient.connect(transport);
   await exerciseAllTools(mcpClient);
+  assert.match(output, /operator_id=integration\.operator operator_type=local-human/);
   assert.doesNotMatch(output, /integration body/);
   assert.doesNotMatch(output, new RegExp(workspace));
   assert.doesNotMatch(output, new RegExp(route));

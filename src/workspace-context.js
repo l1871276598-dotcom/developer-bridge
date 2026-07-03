@@ -83,7 +83,6 @@ async function resolveDirectory(value, message) {
   }
 }
 
-
 async function pathExists(value) {
   try {
     await lstat(value);
@@ -94,9 +93,26 @@ async function pathExists(value) {
   }
 }
 
-async function resolveManagedRoot(root, value) {
+async function resolvePrimaryWorktree(root, commonDir) {
+  const output = await runGit(root, ["worktree", "list", "--porcelain", "-z"]);
+  const record = output.split("\0").find((token) => token.startsWith("worktree "));
+  if (!record) throw new Error("Git primary worktree could not be identified");
+
+  const primaryRoot = await resolveDirectory(
+    record.slice("worktree ".length),
+    "Git primary worktree could not be identified",
+  );
+  const primaryCommonPath = await runGit(primaryRoot, ["rev-parse", "--git-common-dir"]);
+  const primaryCommonDir = await realpath(path.resolve(primaryRoot, primaryCommonPath));
+  if (primaryCommonDir !== commonDir) {
+    throw new Error("Git primary worktree does not match the authorized repository");
+  }
+  return primaryRoot;
+}
+
+async function resolveManagedRoot(initialRoot, value) {
   const candidate = value === undefined
-    ? path.join(path.dirname(root), `${path.basename(root)}-worktrees`)
+    ? path.join(path.dirname(initialRoot), `${path.basename(initialRoot)}-worktrees`)
     : value;
   if (
     typeof candidate !== "string" ||
@@ -109,7 +125,7 @@ async function resolveManagedRoot(root, value) {
   }
 
   const managedRoot = path.normalize(candidate);
-  if (managedRoot === root) throw new Error("Managed worktree root must differ from the workspace");
+  if (managedRoot === initialRoot) throw new Error("Managed worktree root must differ from the workspace");
 
   let ancestor = managedRoot;
   while (!(await pathExists(ancestor))) {
@@ -139,11 +155,13 @@ export async function createWorkspaceContext(workspace, options = {}) {
   let topLevel;
   let commonDir;
   let branch;
+  let initialRoot;
   try {
     topLevel = await realpath(await runGit(root, ["rev-parse", "--show-toplevel"]));
     const commonPath = await runGit(root, ["rev-parse", "--git-common-dir"]);
     commonDir = await realpath(path.resolve(root, commonPath));
     branch = await runGit(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    initialRoot = await resolvePrimaryWorktree(root, commonDir);
   } catch {
     throw new Error("Workspace must identify an attached Git repository branch");
   }
@@ -151,9 +169,9 @@ export async function createWorkspaceContext(workspace, options = {}) {
   if (topLevel !== root) throw new Error("Workspace must be the Git repository root");
   if (branch === "main" || branch === "master") throw new Error("Protected branch is not allowed");
 
-  const managedRoot = await resolveManagedRoot(root, options.managedRoot);
+  const managedRoot = await resolveManagedRoot(initialRoot, options.managedRoot);
 
-  let state = Object.freeze({ root, branch, initialRoot: root, commonDir, managedRoot });
+  let state = Object.freeze({ root, branch, initialRoot, commonDir, managedRoot });
   let tail = Promise.resolve();
 
   return Object.freeze({
