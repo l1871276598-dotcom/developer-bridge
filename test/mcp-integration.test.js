@@ -47,6 +47,7 @@ async function exerciseAllTools(mcpClient) {
     "git_stage",
     "git_commit",
     "git_push_current_branch",
+    "github_pr_create_draft",
     "run_validation",
     "git_branch_list",
     "git_branch_create",
@@ -105,7 +106,7 @@ async function waitForHealth(port) {
   throw new Error("HTTP server did not become healthy");
 }
 
-test("stdio transport scans and runs all sixteen approved tools", async (t) => {
+test("stdio transport scans and runs all seventeen approved tools", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-stdio-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
   await prepareWorkspace(workspace);
@@ -126,7 +127,7 @@ test("stdio transport scans and runs all sixteen approved tools", async (t) => {
   assert.doesNotMatch(stderr, new RegExp(workspace));
 });
 
-test("HTTP transport scans and runs all sixteen approved tools without leaking route", async (t) => {
+test("HTTP transport scans and runs all seventeen approved tools without leaking route", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-http-"));
   await prepareWorkspace(workspace);
   const port = await freePort();

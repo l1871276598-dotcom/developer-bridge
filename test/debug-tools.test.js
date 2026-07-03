@@ -36,7 +36,7 @@ async function fixture(t, { initializeGit = true, packageTest = "node --test tar
   return { workspace, core };
 }
 
-test("exposes exactly sixteen tools with strict schemas and read-only Git annotations", async (t) => {
+test("exposes exactly seventeen tools with strict schemas and read-only Git annotations", async (t) => {
   const { core } = await fixture(t);
   assert.deepEqual(core.tools.map(({ name }) => name), [
     "list_files",
@@ -45,6 +45,7 @@ test("exposes exactly sixteen tools with strict schemas and read-only Git annota
     "git_stage",
     "git_commit",
     "git_push_current_branch",
+    "github_pr_create_draft",
     "run_validation",
     "git_branch_list",
     "git_branch_create",

@@ -30,7 +30,7 @@ function resultText(result) {
   return result.content[0].text;
 }
 
-test("exposes exactly the sixteen approved tools with strict object schemas", async (t) => {
+test("exposes exactly the seventeen approved tools with strict object schemas", async (t) => {
   const { core } = await fixture(t);
   assert.deepEqual(core.tools.map(({ name }) => name), [
     "list_files",
@@ -39,6 +39,7 @@ test("exposes exactly the sixteen approved tools with strict object schemas", as
     "git_stage",
     "git_commit",
     "git_push_current_branch",
+    "github_pr_create_draft",
     "run_validation",
     "git_branch_list",
     "git_branch_create",

@@ -9,6 +9,9 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
+delete process.env.GH_REPO;
+delete process.env.GH_HOST;
+
 const workspace = process.env.DEVELOPER_BRIDGE_WORKSPACE;
 if (typeof workspace !== "string" || workspace.length === 0) {
   console.error("Configuration error: DEVELOPER_BRIDGE_WORKSPACE is required. Set it to an existing authorized project directory before starting the server.");

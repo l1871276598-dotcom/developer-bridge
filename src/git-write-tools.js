@@ -21,6 +21,7 @@ const WRITE_TOOL_NAMES = new Set([
   "git_stage",
   "git_commit",
   "git_push_current_branch",
+  "github_pr_create_draft",
   "run_validation",
 ]);
 
@@ -67,6 +68,16 @@ export const GIT_WRITE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "github_pr_create_draft",
+    description:
+      "Create one GitHub Draft pull request from the clean, fully pushed authorized branch using fixed gh arguments and repository defaults.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    },
+  },
+  {
     name: "run_validation",
     description:
       "Run fixed validation commands: pytest, compileall and Git diff checks. Arbitrary commands are not accepted.",
@@ -94,6 +105,15 @@ function assertSnapshot(snapshot) {
   return snapshot;
 }
 
+function assertPlainArguments(args, allowed = []) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    throw new Error("Arguments must be an object.");
+  }
+  for (const key of Object.keys(args)) {
+    if (!allowed.includes(key)) throw new Error(`Unexpected argument: ${key}`);
+  }
+}
+
 function clip(value) {
   const text = String(value ?? "");
   return text.length <= MAX_OUTPUT
@@ -106,13 +126,15 @@ function run(command, args, options = {}) {
     cwd,
     timeoutMs = TIMEOUT_MS,
     allowedExitCodes = [0],
+    envOverrides = {},
   } = options;
   if (typeof cwd !== "string" || !cwd) throw new Error("A fixed command cwd is required.");
 
   return new Promise((resolve, reject) => {
+    const baseEnv = command === "git" ? { ...process.env, ...SAFE_GIT_ENV } : process.env;
     const child = spawn(command, args, {
       cwd,
-      env: command === "git" ? { ...process.env, ...SAFE_GIT_ENV } : process.env,
+      env: { ...baseEnv, ...envOverrides },
       shell: false,
       windowsHide: true,
     });
@@ -250,10 +272,6 @@ function safePath(root, supplied) {
     throw new Error(`Path escapes workspace or is the workspace root: ${input}`);
   }
 
-  /*
-   * Deleted paths do not exist, but still need to be stageable. For existing
-   * paths, resolve symlinks and ensure they remain inside the workspace.
-   */
   if (fs.existsSync(absolute)) {
     const real = fs.realpathSync(absolute);
     const realRelative = path.relative(root, real);
@@ -358,6 +376,64 @@ async function push(snapshotValue) {
   };
 }
 
+function isGitHubOrigin(remote) {
+  return (
+    /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+(?:\.git)?$/u.test(remote) ||
+    /^git@github\.com:[^/\s]+\/[^/\s]+(?:\.git)?$/u.test(remote) ||
+    /^ssh:\/\/git@github\.com\/[^/\s]+\/[^/\s]+(?:\.git)?$/u.test(remote)
+  );
+}
+
+async function createDraftPr(args, snapshotValue, runCommand) {
+  assertPlainArguments(args);
+  const snapshot = await assertAuthorized(snapshotValue);
+  const branch = snapshot.branch;
+  const status = await git(["status", "--porcelain=v1", "-z"], snapshot);
+  if (status.stdout.length !== 0) throw new Error("Git workspace must be clean before creating a Draft PR.");
+
+  const remote = (await git(["remote", "get-url", "origin"], snapshot)).stdout.trim();
+  if (!isGitHubOrigin(remote)) throw new Error("A GitHub origin remote is required.");
+
+  const upstream = (await git(
+    ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+    snapshot,
+  )).stdout.trim();
+  if (upstream !== `origin/${branch}`) {
+    throw new Error("Current branch must track the same branch on origin.");
+  }
+
+  const localHead = (await git(["rev-parse", "HEAD"], snapshot)).stdout.trim();
+  const remoteHead = (await git(["rev-parse", `refs/remotes/origin/${branch}`], snapshot)).stdout.trim();
+  if (localHead !== remoteHead) throw new Error("Current branch must be fully pushed before creating a Draft PR.");
+
+  const envOverrides = {
+    ...SAFE_GIT_ENV,
+    GH_PROMPT_DISABLED: "1",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  await runCommand("gh", ["auth", "status", "--hostname", "github.com"], {
+    cwd: snapshot.root,
+    timeoutMs: 60_000,
+    envOverrides,
+  });
+  const created = await runCommand("gh", ["pr", "create", "--draft", "--fill"], {
+    cwd: snapshot.root,
+    timeoutMs: 120_000,
+    envOverrides,
+  });
+  const url = created.stdout
+    .trim()
+    .split(/\r?\n/u)
+    .reverse()
+    .find((line) => /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+$/u.test(line));
+  if (!url) throw new Error("GitHub did not return a valid pull request URL.");
+
+  return {
+    text: JSON.stringify({ draft: true, branch, url }),
+    auditBranch: branch,
+  };
+}
+
 async function validate(snapshotValue) {
   const snapshot = await assertAuthorized(snapshotValue);
   const branch = snapshot.branch;
@@ -388,10 +464,13 @@ async function validate(snapshotValue) {
   return { text: output.filter((item) => item !== "").join("\n") };
 }
 
-export async function handleGitWriteTool(name, args = {}, snapshot) {
+export async function handleGitWriteTool(name, args = {}, snapshot, options = {}) {
   if (name === "git_stage") return stage(args, snapshot);
   if (name === "git_commit") return commit(args, snapshot);
   if (name === "git_push_current_branch") return push(snapshot);
+  if (name === "github_pr_create_draft") {
+    return createDraftPr(args, snapshot, options.runCommand || run);
+  }
   if (name === "run_validation") return validate(snapshot);
   throw new Error(`Unsupported Git write tool: ${name}`);
 }

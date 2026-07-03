@@ -12,6 +12,9 @@ import {
   isInitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 
+delete process.env.GH_REPO;
+delete process.env.GH_HOST;
+
 const configuredPort = process.env.DEVELOPER_BRIDGE_PORT;
 const PORT = configuredPort === undefined ? 3000 : Number(configuredPort);
 if (!Number.isInteger(PORT) || PORT < 0 || PORT > 65535) {

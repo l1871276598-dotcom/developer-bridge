@@ -53,6 +53,14 @@ test("gitignore protects generated output, local configuration, and private keys
   }
 });
 
+test("HTTP and stdio entrypoints clear GitHub repository overrides", async () => {
+  for (const relativePath of ["mcp-http.js", "server.js"]) {
+    const source = await readFile(path.join(projectRoot, relativePath), "utf8");
+    assert.match(source, /delete process\.env\.GH_REPO/u);
+    assert.match(source, /delete process\.env\.GH_HOST/u);
+  }
+});
+
 test("README documents the supported setup, connection, tools, and safety boundary", async () => {
   const readme = await readFile(path.join(projectRoot, "README.md"), "utf8");
 
@@ -79,6 +87,9 @@ test("README documents the supported setup, connection, tools, and safety bounda
     /git_stage/u,
     /git_commit/u,
     /git_push_current_branch/u,
+    /github_pr_create_draft/u,
+    /gh pr create --draft --fill/u,
+    /GitHub CLI/u,
     /git_branch_list/u,
     /git_branch_create/u,
     /git_branch_switch/u,
@@ -94,7 +105,8 @@ test("README documents the supported setup, connection, tools, and safety bounda
     /(?:no|无)[^\n]*(?:automatic commit|自动 commit)/iu,
     /(?:no|无)[^\n]*(?:automatic push|自动 push)/iu,
     /(?:no|无)[^\n]*(?:outside|工作区外)/iu,
-    /(?:no|无)[^\n]*(?:arbitrary Git arguments|任意 Git 参数)/iu,
+    /(?:no|无)[^\n]*(?:arbitrary Git|任意 Git)/iu,
+    /(?:no|无)[^\n]*(?:arbitrary.*gh|任意.*gh)/iu,
     /(?:no|无)[^\n]*(?:detached|分离)/iu,
     /https:\/\/<ngrok-domain>\/<MCP_PATH>/u,
   ]) {
