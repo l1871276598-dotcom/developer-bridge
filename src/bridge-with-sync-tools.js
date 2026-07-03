@@ -3,6 +3,14 @@ import path from "node:path";
 
 import { createOperatorAuditLogger } from "./audit-actor.js";
 import { createBridgeCore } from "./bridge-core.js";
+import { guardControlledEngineeringTool as preflightControlledTool } from "./controlled-engineering-guards.js";
+import {
+  CONTROLLED_ENGINEERING_TOOL_DEFINITIONS,
+  REQUIRED_TOOL_NAMES,
+  handleControlledEngineeringTool,
+  isControlledEngineeringTool,
+  validateRequiredToolContract,
+} from "./controlled-engineering-tools.js";
 import {
   GITHUB_PR_MERGE_TOOL_DEFINITIONS,
   handleGitHubPrMergeTool,
@@ -44,12 +52,39 @@ async function repositoryIdentity(root) {
   };
 }
 
+function orderedToolSet(definitions, env) {
+  const byName = new Map();
+  for (const definition of definitions) {
+    if (!definition || typeof definition.name !== "string") throw new Error("Invalid tool definition.");
+    if (byName.has(definition.name)) throw new Error(`Duplicate tool definition: ${definition.name}`);
+    byName.set(definition.name, definition);
+  }
+  const ordered = REQUIRED_TOOL_NAMES.map((name) => {
+    const definition = byName.get(name);
+    if (!definition) throw new Error(`Missing required tool definition: ${name}`);
+    return definition;
+  });
+  if (byName.size !== ordered.length) {
+    const unexpected = [...byName.keys()].filter((name) => !REQUIRED_TOOL_NAMES.includes(name));
+    throw new Error(`Unexpected tool definitions: ${unexpected.join(", ")}`);
+  }
+  validateRequiredToolContract(ordered.map(({ name }) => name), env);
+  return Object.freeze(ordered);
+}
+
 export async function createBridgeWithSyncTools(workspace, logger, options = {}) {
   const baseLogger = logger ?? ((line) => console.error(line));
   const auditLogger = createOperatorAuditLogger(baseLogger, options.operatorIdentity);
   const core = await createBridgeCore(workspace, auditLogger);
   const identity = await repositoryIdentity(workspace);
   const fetchTool = GIT_SYNC_TOOL_DEFINITIONS.find(({ name }) => name === "git_fetch_origin_main");
+  const tools = orderedToolSet([
+    ...core.tools,
+    fetchTool,
+    ...GIT_MERGE_TOOL_DEFINITIONS,
+    ...GITHUB_PR_MERGE_TOOL_DEFINITIONS,
+    ...CONTROLLED_ENGINEERING_TOOL_DEFINITIONS,
+  ], options.env || process.env);
   let activeRoot = identity.root;
   let queue = Promise.resolve();
 
@@ -82,23 +117,31 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
   }
 
   return {
-    tools: Object.freeze([
-      ...core.tools,
-      fetchTool,
-      ...GIT_MERGE_TOOL_DEFINITIONS,
-      ...GITHUB_PR_MERGE_TOOL_DEFINITIONS,
-    ]),
+    tools,
     callTool(name, args = {}) {
       return serialize(async () => {
-        if (name === "git_fetch_origin_main" || isGitMergeTool(name) || isGitHubPrMergeTool(name)) {
+        if (
+          name === "git_fetch_origin_main" ||
+          isGitMergeTool(name) ||
+          isGitHubPrMergeTool(name) ||
+          isControlledEngineeringTool(name)
+        ) {
           const started = Date.now();
           try {
             await assertActiveIdentity();
+            if (isControlledEngineeringTool(name)) {
+              await preflightControlledTool(name, args, activeRoot);
+            }
             const result = name === "git_fetch_origin_main"
               ? await handleGitSyncTool(name, args, activeRoot)
               : isGitMergeTool(name)
                 ? await handleGitMergeTool(name, args, activeRoot)
-                : await handleGitHubPrMergeTool(name, args, activeRoot);
+                : isGitHubPrMergeTool(name)
+                  ? await handleGitHubPrMergeTool(name, args, activeRoot)
+                  : await handleControlledEngineeringTool(name, args, activeRoot, {
+                    env: options.env || process.env,
+                    runCommand: options.controlledRunCommand,
+                  });
             auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
             return textResult(result.text);
           } catch {
