@@ -25,8 +25,11 @@ Choose a single Git project as the authorized workspace and replace the placehol
 
 ```bash
 export DEVELOPER_BRIDGE_WORKSPACE="..."
+export DEVELOPER_BRIDGE_OPERATOR_ID="local-operator"
 export MCP_PATH="mcp-..."
 ```
+
+`DEVELOPER_BRIDGE_OPERATOR_ID` is required for HTTP and stdio startup. It accepts 1–64 ASCII letters, digits, dots, underscores, or hyphens. The Bridge reads it once at startup, records it in tool audit logs as `operator_id`, and records the fixed `operator_type=local-human`. MCP tool arguments cannot change this startup value.
 
 The workspace must be the real top-level directory of a repository on an attached branch other than `main` or `master`. `DEVELOPER_BRIDGE_WORKSPACE` should be restricted to a single project. Do not commit the secret local path or other secrets. `MCP_PATH` is a single private path segment, not a complete URL, and must not be hard-coded in the repository.
 
@@ -68,7 +71,7 @@ For a local MCP client that uses stdio instead of HTTP, run:
 npm run start:stdio
 ```
 
-The stdio service requires `DEVELOPER_BRIDGE_WORKSPACE` but does not use `MCP_PATH`.
+The stdio service requires `DEVELOPER_BRIDGE_WORKSPACE` and `DEVELOPER_BRIDGE_OPERATOR_ID` but does not use `MCP_PATH`.
 
 ## Current tools
 
@@ -106,6 +109,7 @@ Controlled branch and worktree tools:
 
 ## Safety boundary
 
+- Startup fails closed when `DEVELOPER_BRIDGE_OPERATOR_ID` is missing or invalid.
 - No delete, prune, move, rebase, tag, reset, clean, force, PR merge, PR close, or Ready-for-review operations.
 - No detached `HEAD`, and no authorization or mutation of `main` or `master`.
 - Branch/worktree switching requires a clean tracked and untracked state and no merge, rebase, cherry-pick, revert, or bisect in progress.

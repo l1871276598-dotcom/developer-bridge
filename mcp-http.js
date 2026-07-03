@@ -2,6 +2,7 @@ import express from "express";
 import process from "process";
 import { randomUUID } from "crypto";
 
+import { operatorIdentityFromEnvironment } from "./src/audit-actor.js";
 import { createBridgeWithSyncTools as createBridgeCore } from "./src/bridge-with-sync-tools.js";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -47,11 +48,19 @@ if (!/^[A-Za-z0-9._~-]+$/.test(rawMcpPath) || rawMcpPath === "." || rawMcpPath =
   process.exit(1);
 }
 
+let operatorIdentity;
+try {
+  operatorIdentity = operatorIdentityFromEnvironment(process.env);
+} catch (error) {
+  console.error(`Configuration error: ${error instanceof Error ? error.message : "invalid operator identity"}`);
+  process.exit(1);
+}
+
 const MCP_PATH = `/${rawMcpPath}`;
 
 let bridge;
 try {
-  bridge = await createBridgeCore(workspace);
+  bridge = await createBridgeCore(workspace, undefined, { operatorIdentity });
 } catch (error) {
   console.error(`Configuration error: ${error instanceof Error ? error.message : "invalid workspace"}. Set DEVELOPER_BRIDGE_WORKSPACE to an existing authorized project directory.`);
   process.exit(1);

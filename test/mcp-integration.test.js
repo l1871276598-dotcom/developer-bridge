@@ -13,6 +13,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
 const execFileAsync = promisify(execFile);
+const OPERATOR_ID = "integration.operator";
 
 const APPROVED_TOOLS = [
   "list_files",
@@ -76,6 +77,7 @@ async function exerciseAllTools(mcpClient) {
   assert.equal(write.isError, undefined);
   const read = await mcpClient.callTool({ name: "read_file", arguments: { path: "integration.txt" } });
   assert.equal(read.content[0].text, "integration body");
+  assert.doesNotMatch(read.content[0].text, new RegExp(OPERATOR_ID));
   const list = await mcpClient.callTool({ name: "list_files", arguments: { path: "." } });
   assert.match(list.content[0].text, /FILE integration\.txt/);
   const trackedWrite = await mcpClient.callTool({
@@ -119,7 +121,11 @@ test("stdio transport scans and runs all twenty approved tools", async (t) => {
     command: process.execPath,
     args: ["server.js"],
     cwd: projectRoot,
-    env: { ...process.env, DEVELOPER_BRIDGE_WORKSPACE: workspace },
+    env: {
+      ...process.env,
+      DEVELOPER_BRIDGE_OPERATOR_ID: OPERATOR_ID,
+      DEVELOPER_BRIDGE_WORKSPACE: workspace,
+    },
     stderr: "pipe",
   });
   let stderr = "";
@@ -128,6 +134,7 @@ test("stdio transport scans and runs all twenty approved tools", async (t) => {
   t.after(() => mcpClient.close());
   await mcpClient.connect(transport);
   await exerciseAllTools(mcpClient);
+  assert.match(stderr, /operator_id=integration\.operator operator_type=local-human/);
   assert.doesNotMatch(stderr, /integration body/);
   assert.doesNotMatch(stderr, new RegExp(workspace));
 });
@@ -141,6 +148,7 @@ test("HTTP transport scans and runs all twenty approved tools without leaking ro
     cwd: projectRoot,
     env: {
       ...process.env,
+      DEVELOPER_BRIDGE_OPERATOR_ID: OPERATOR_ID,
       DEVELOPER_BRIDGE_WORKSPACE: workspace,
       DEVELOPER_BRIDGE_PORT: String(port),
       MCP_PATH: route,
@@ -166,6 +174,7 @@ test("HTTP transport scans and runs all twenty approved tools without leaking ro
   mcpClient = client();
   await mcpClient.connect(transport);
   await exerciseAllTools(mcpClient);
+  assert.match(output, /operator_id=integration\.operator operator_type=local-human/);
   assert.doesNotMatch(output, /integration body/);
   assert.doesNotMatch(output, new RegExp(workspace));
   assert.doesNotMatch(output, new RegExp(route));

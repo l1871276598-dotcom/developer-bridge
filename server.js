@@ -1,5 +1,6 @@
 import process from "process";
 
+import { operatorIdentityFromEnvironment } from "./src/audit-actor.js";
 import { createBridgeWithSyncTools } from "./src/bridge-with-sync-tools.js";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -18,9 +19,17 @@ if (typeof workspace !== "string" || workspace.length === 0) {
   process.exit(1);
 }
 
+let operatorIdentity;
+try {
+  operatorIdentity = operatorIdentityFromEnvironment(process.env);
+} catch (error) {
+  console.error(`Configuration error: ${error instanceof Error ? error.message : "invalid operator identity"}`);
+  process.exit(1);
+}
+
 let bridge;
 try {
-  bridge = await createBridgeWithSyncTools(workspace);
+  bridge = await createBridgeWithSyncTools(workspace, undefined, { operatorIdentity });
 } catch (error) {
   console.error(`Configuration error: ${error instanceof Error ? error.message : "invalid workspace"}. Set DEVELOPER_BRIDGE_WORKSPACE to an existing authorized project directory.`);
   process.exit(1);
