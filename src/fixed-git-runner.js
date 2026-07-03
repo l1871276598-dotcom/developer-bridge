@@ -16,6 +16,9 @@ const SAFE_GIT_ENV = Object.freeze({
   GIT_TERMINAL_PROMPT: "0",
 });
 
+process.env.GIT_CONFIG_GLOBAL = os.devNull;
+process.env.GIT_CONFIG_SYSTEM = os.devNull;
+
 function blockedTransportKey(key) {
   return (
     key === "core.askpass" ||
