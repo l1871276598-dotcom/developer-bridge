@@ -36,6 +36,7 @@ const APPROVED_TOOLS = [
   "git_fetch_origin_main",
   "git_merge_origin_main",
   "git_merge_abort",
+  "github_pr_merge_squash_if_green",
 ];
 
 function client() {
@@ -113,7 +114,7 @@ async function waitForHealth(port) {
   throw new Error("HTTP server did not become healthy");
 }
 
-test("stdio transport scans and runs all twenty approved tools", async (t) => {
+test("stdio transport scans and runs all twenty-one approved tools", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-stdio-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
   await prepareWorkspace(workspace);
@@ -139,7 +140,7 @@ test("stdio transport scans and runs all twenty approved tools", async (t) => {
   assert.doesNotMatch(stderr, new RegExp(workspace));
 });
 
-test("HTTP transport scans and runs all twenty approved tools without leaking route", async (t) => {
+test("HTTP transport scans and runs all twenty-one approved tools without leaking route", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-http-"));
   await prepareWorkspace(workspace);
   const port = await freePort();

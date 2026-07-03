@@ -270,7 +270,10 @@ test("bridge operations follow the live managed-worktree context", async (t) => 
   await git(workspace, "commit", "-m", "core fixture");
   let initialHead = (await git(workspace, "rev-parse", "HEAD")).stdout.trim();
   const logs = [];
-  const core = await createBridgeCore(workspace, (line) => logs.push(line));
+  const managedRootPath = path.join(path.dirname(workspace), "workspace-worktrees");
+  const core = await createBridgeCore(workspace, (line) => logs.push(line), {
+    managedRoot: managedRootPath,
+  });
 
   const created = await core.callTool("git_worktree_create", {
     branch: "feat/managed",

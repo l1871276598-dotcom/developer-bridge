@@ -4,6 +4,11 @@ import path from "node:path";
 import { createOperatorAuditLogger } from "./audit-actor.js";
 import { createBridgeCore } from "./bridge-core.js";
 import {
+  GITHUB_PR_MERGE_TOOL_DEFINITIONS,
+  handleGitHubPrMergeTool,
+  isGitHubPrMergeTool,
+} from "./github-pr-merge-tool.js";
+import {
   GIT_MERGE_TOOL_DEFINITIONS,
   handleGitMergeTool,
   isGitMergeTool,
@@ -81,16 +86,19 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
       ...core.tools,
       fetchTool,
       ...GIT_MERGE_TOOL_DEFINITIONS,
+      ...GITHUB_PR_MERGE_TOOL_DEFINITIONS,
     ]),
     callTool(name, args = {}) {
       return serialize(async () => {
-        if (name === "git_fetch_origin_main" || isGitMergeTool(name)) {
+        if (name === "git_fetch_origin_main" || isGitMergeTool(name) || isGitHubPrMergeTool(name)) {
           const started = Date.now();
           try {
             await assertActiveIdentity();
             const result = name === "git_fetch_origin_main"
               ? await handleGitSyncTool(name, args, activeRoot)
-              : await handleGitMergeTool(name, args, activeRoot);
+              : isGitMergeTool(name)
+                ? await handleGitMergeTool(name, args, activeRoot)
+                : await handleGitHubPrMergeTool(name, args, activeRoot);
             auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
             return textResult(result.text);
           } catch {
