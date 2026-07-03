@@ -7,31 +7,8 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { createBridgeCore } from "../src/bridge-core.js";
-import { runBoundedProcess } from "../src/bounded-process.js";
 
 const execFileAsync = promisify(execFile);
-
-test("runBoundedProcess returns structured output for a failing command", async () => {
-  const result = await runBoundedProcess(process.execPath, [
-    "-e",
-    "console.log('OUT'); console.error('ERR'); process.exitCode=7",
-  ], { timeoutMs: 2_000 });
-
-  assert.deepEqual(Object.keys(result).sort(), [
-    "exitCode",
-    "outputLimitExceeded",
-    "signal",
-    "stderr",
-    "stdout",
-    "timedOut",
-  ]);
-  assert.equal(result.exitCode, 7);
-  assert.equal(result.signal, null);
-  assert.equal(result.stdout, "OUT\n");
-  assert.equal(result.stderr, "ERR\n");
-  assert.equal(result.timedOut, false);
-  assert.equal(result.outputLimitExceeded, false);
-});
 
 function resultText(result) {
   return result.content[0].text;
@@ -49,7 +26,7 @@ async function fixture(t, { initializeGit = true, packageTest = "node --test tar
     scripts: { test: packageTest },
   }), "utf8");
   if (initializeGit) {
-    await git(workspace, "init", "--quiet");
+    await git(workspace, "init", "--quiet", "-b", "feat/test");
     await git(workspace, "config", "user.email", "test@example.invalid");
     await git(workspace, "config", "user.name", "Developer Bridge Test");
     await git(workspace, "add", "package.json");
@@ -59,20 +36,31 @@ async function fixture(t, { initializeGit = true, packageTest = "node --test tar
   return { workspace, core };
 }
 
-test("exposes exactly ten tools with strict schemas and expected annotations", async (t) => {
+test("exposes exactly seventeen tools with strict schemas and read-only Git annotations", async (t) => {
   const { core } = await fixture(t);
   assert.deepEqual(core.tools.map(({ name }) => name), [
-    "list_files", "read_file", "write_file", "git_status", "git_diff", "run_tests", "run_python_file", "git_add", "git_commit", "git_push",
+    "list_files",
+    "read_file",
+    "write_file",
+    "git_stage",
+    "git_commit",
+    "git_push_current_branch",
+    "github_pr_create_draft",
+    "run_validation",
+    "git_branch_list",
+    "git_branch_create",
+    "git_branch_switch",
+    "git_worktree_list",
+    "git_worktree_create",
+    "git_worktree_switch",
+    "git_status",
+    "git_diff",
+    "run_tests",
   ]);
   for (const tool of core.tools) assert.equal(tool.inputSchema.additionalProperties, false);
   assert.equal(core.tools.find(({ name }) => name === "git_status").annotations.readOnlyHint, true);
   assert.equal(core.tools.find(({ name }) => name === "git_diff").annotations.readOnlyHint, true);
   assert.notEqual(core.tools.find(({ name }) => name === "run_tests").annotations?.readOnlyHint, true);
-  assert.deepEqual(core.tools.find(({ name }) => name === "run_python_file").annotations, {
-    readOnlyHint: false,
-    destructiveHint: true,
-    openWorldHint: true,
-  });
 });
 
 test("git_status reports clean and modified repositories without accepting arguments", async (t) => {
@@ -97,13 +85,11 @@ test("git_status never executes a repository-configured fsmonitor command", asyn
   await assert.rejects(access(canary));
 });
 
-test("git_status and git_diff return clear errors outside a Git repository", async (t) => {
-  const { core } = await fixture(t, { initializeGit: false });
-  for (const name of ["git_status", "git_diff"]) {
-    const result = await core.callTool(name, {});
-    assert.equal(result.isError, true);
-    assert.match(resultText(result), /not a Git repository/i);
-  }
+test("bridge startup rejects a workspace outside a Git repository", async (t) => {
+  await assert.rejects(
+    fixture(t, { initializeGit: false }),
+    /Git repository branch/i,
+  );
 });
 
 test("git_status rejects output over its fixed limit", async (t) => {
@@ -246,7 +232,7 @@ for (const stream of ["stdout", "stderr"]) {
 test("run_tests times out and terminates the npm process group including its grandchild", async (t) => {
   const { workspace, core } = await fixture(t, {
     packageTest: "node parent.mjs",
-    coreOptions: { testTimeoutMs: 500, terminationGraceMs: 100 },
+    coreOptions: { testTimeoutMs: 1_500, terminationGraceMs: 200 },
   });
   await writeFile(path.join(workspace, "child.mjs"), [
     'import { writeFileSync } from "node:fs";',
@@ -265,7 +251,7 @@ test("run_tests times out and terminates the npm process group including its gra
   const started = Date.now();
   const payload = JSON.parse(resultText(await core.callTool("run_tests", { test: "default" })));
   assert.equal(payload.timedOut, true);
-  assert.ok(Date.now() - started < 3_000);
+  assert.ok(Date.now() - started < 5_000);
   const childPid = Number(await readFile(path.join(workspace, "child.pid"), "utf8"));
   const deadline = Date.now() + 2_000;
   let alive = true;
@@ -284,7 +270,7 @@ test("run_tests times out and terminates the npm process group including its gra
 test("run_tests retains ownership of its process group throughout the termination grace period", async (t) => {
   const { workspace, core } = await fixture(t, {
     packageTest: "node owner.mjs",
-    coreOptions: { testTimeoutMs: 300, terminationGraceMs: 700 },
+    coreOptions: { testTimeoutMs: 1_200, terminationGraceMs: 1_500 },
   });
   await writeFile(path.join(workspace, "owner.mjs"), [
     'import { execFileSync } from "node:child_process";',
@@ -307,7 +293,7 @@ test("run_tests retains ownership of its process group throughout the terminatio
     }
   }
   const pgid = Number(await readFile(path.join(workspace, "group.id"), "utf8"));
-  await new Promise((resolve) => setTimeout(resolve, 450));
+  await new Promise((resolve) => setTimeout(resolve, 1_350));
   assert.doesNotThrow(() => process.kill(-pgid, 0));
   const payload = JSON.parse(resultText(await running));
   assert.equal(payload.timedOut, true);

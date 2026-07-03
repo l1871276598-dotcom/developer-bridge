@@ -17,7 +17,7 @@ async function git(cwd, ...args) {
 async function repository(t) {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-p2-audit-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
-  await git(workspace, "init", "--quiet");
+  await git(workspace, "init", "--quiet", "-b", "feat/test");
   await git(workspace, "config", "user.email", "test@example.invalid");
   await git(workspace, "config", "user.name", "Developer Bridge Audit");
   await writeFile(path.join(workspace, "tracked.txt"), "before\n", "utf8");
@@ -90,4 +90,56 @@ test("git_diff blocks repository textconv for both unstaged and staged diffs", a
   assert.match(resultText(staged), /-before/);
   assert.match(resultText(staged), /\+after/);
   await assert.rejects(access(canary));
+});
+
+test("controlled branch switches do not execute repository checkout hooks", async (t) => {
+  const workspace = await repository(t);
+  await git(workspace, "branch", "feat/next");
+  const canary = path.join(workspace, "checkout-hook-canary");
+  const hook = path.join(workspace, ".git", "hooks", "post-checkout");
+  await writeFile(hook, `#!/bin/sh\ntouch "${canary}"\n`, "utf8");
+  await chmod(hook, 0o755);
+
+  const core = await createBridgeCore(workspace, () => {});
+  const result = await core.callTool("git_branch_switch", { branch: "feat/next" });
+  assert.equal(result.isError, undefined);
+  await assert.rejects(access(canary));
+});
+
+test("git_stage rejects repository-configured external filters before execution", async (t) => {
+  const workspace = await repository(t);
+  const canary = path.join(workspace, "clean-filter-canary");
+  const filter = path.join(workspace, "clean-filter.sh");
+  await writeFile(filter, `#!/bin/sh\ntouch "${canary}"\ncat\n`, "utf8");
+  await chmod(filter, 0o755);
+  await writeFile(path.join(workspace, ".gitattributes"), "tracked.txt filter=canary\n", "utf8");
+  await git(workspace, "config", "filter.canary.clean", filter);
+
+  const core = await createBridgeCore(workspace, () => {});
+  await writeFile(path.join(workspace, "tracked.txt"), "after\n", "utf8");
+  const result = await core.callTool("git_stage", { paths: ["tracked.txt"] });
+  assert.equal(result.isError, true);
+  await assert.rejects(access(canary));
+  assert.match((await git(workspace, "status", "--short")).stdout, / M tracked\.txt/);
+});
+
+test("git_commit does not execute repository hooks or signing programs", async (t) => {
+  const workspace = await repository(t);
+  const hookCanary = path.join(workspace, "commit-hook-canary");
+  const signerCanary = path.join(workspace, "commit-signer-canary");
+  const hook = path.join(workspace, ".git", "hooks", "pre-commit");
+  const signer = path.join(workspace, "signer.sh");
+  await writeFile(hook, `#!/bin/sh\ntouch "${hookCanary}"\nexit 1\n`, "utf8");
+  await writeFile(signer, `#!/bin/sh\ntouch "${signerCanary}"\nexit 1\n`, "utf8");
+  await chmod(hook, 0o755);
+  await chmod(signer, 0o755);
+  await git(workspace, "config", "commit.gpgSign", "true");
+  await git(workspace, "config", "gpg.program", signer);
+
+  const core = await createBridgeCore(workspace, () => {});
+  await writeFile(path.join(workspace, "tracked.txt"), "after\n", "utf8");
+  assert.equal((await core.callTool("git_stage", { paths: ["tracked.txt"] })).isError, undefined);
+  assert.equal((await core.callTool("git_commit", { message: "test: safe commit" })).isError, undefined);
+  await assert.rejects(access(hookCanary));
+  await assert.rejects(access(signerCanary));
 });

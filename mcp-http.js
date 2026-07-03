@@ -2,7 +2,7 @@ import express from "express";
 import process from "process";
 import { randomUUID } from "crypto";
 
-import { createBridgeCore } from "./src/bridge-core.js";
+import { createBridgeWithSyncTools as createBridgeCore } from "./src/bridge-with-sync-tools.js";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -11,6 +11,9 @@ import {
   ListToolsRequestSchema,
   isInitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
+
+delete process.env.GH_REPO;
+delete process.env.GH_HOST;
 
 const configuredPort = process.env.DEVELOPER_BRIDGE_PORT;
 const PORT = configuredPort === undefined ? 3000 : Number(configuredPort);
@@ -36,10 +39,6 @@ const rawMcpPath = requiredEnvironment(
   "MCP_PATH",
   'Set it to a single private route segment such as "mcp-abc123".',
 );
-const allowedBranch = requiredEnvironment(
-  "DEVELOPER_BRIDGE_ALLOWED_BRANCH",
-  "Set it to the single Git branch that this Bridge may modify, commit, and push.",
-);
 
 if (!/^[A-Za-z0-9._~-]+$/.test(rawMcpPath) || rawMcpPath === "." || rawMcpPath === "..") {
   console.error(
@@ -52,7 +51,7 @@ const MCP_PATH = `/${rawMcpPath}`;
 
 let bridge;
 try {
-  bridge = await createBridgeCore(workspace, undefined, { allowedBranch });
+  bridge = await createBridgeCore(workspace);
 } catch (error) {
   console.error(`Configuration error: ${error instanceof Error ? error.message : "invalid workspace"}. Set DEVELOPER_BRIDGE_WORKSPACE to an existing authorized project directory.`);
   process.exit(1);

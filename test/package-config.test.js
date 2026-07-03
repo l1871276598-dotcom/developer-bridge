@@ -3,6 +3,9 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
+import { GIT_MERGE_TOOL_DEFINITIONS } from "../src/git-merge-tools.js";
+import { GIT_SYNC_TOOL_DEFINITIONS } from "../src/git-sync-tools.js";
+
 const projectRoot = path.resolve(import.meta.dirname, "..");
 
 async function exists(relativePath) {
@@ -16,6 +19,19 @@ test("package scripts expose the HTTP default, stdio alternative, and complete t
     "start:stdio": "node server.js",
     test: "node --test test/*.test.js",
   });
+});
+
+test("controlled sync tools use strict fixed schemas", () => {
+  const tools = [...GIT_SYNC_TOOL_DEFINITIONS, ...GIT_MERGE_TOOL_DEFINITIONS];
+  assert.deepEqual(tools.map(({ name }) => name), [
+    "git_fetch_origin_main",
+    "git_merge_origin_main",
+    "git_merge_abort",
+  ]);
+  for (const tool of tools) {
+    assert.equal(tool.inputSchema.type, "object");
+    assert.equal(tool.inputSchema.additionalProperties, false);
+  }
 });
 
 test("obsolete implementations, scratch files, and empty source directories are absent", async () => {
@@ -53,6 +69,14 @@ test("gitignore protects generated output, local configuration, and private keys
   }
 });
 
+test("HTTP and stdio entrypoints clear GitHub repository overrides", async () => {
+  for (const relativePath of ["mcp-http.js", "server.js"]) {
+    const source = await readFile(path.join(projectRoot, relativePath), "utf8");
+    assert.match(source, /delete process\.env\.GH_REPO/u);
+    assert.match(source, /delete process\.env\.GH_HOST/u);
+  }
+});
+
 test("README documents the supported setup, connection, tools, and safety boundary", async () => {
   const readme = await readFile(path.join(projectRoot, "README.md"), "utf8");
 
@@ -75,11 +99,31 @@ test("README documents the supported setup, connection, tools, and safety bounda
     /git_status/u,
     /git_diff/u,
     /run_tests/u,
+    /run_validation/u,
+    /git_stage/u,
+    /git_commit/u,
+    /git_push_current_branch/u,
+    /github_pr_create_draft/u,
+    /gh pr create --draft --fill/u,
+    /GitHub CLI/u,
+    /git_branch_list/u,
+    /git_branch_create/u,
+    /git_branch_switch/u,
+    /git_worktree_list/u,
+    /git_worktree_create/u,
+    /git_worktree_switch/u,
+    /DEVELOPER_BRIDGE_WORKTREE_ROOT/u,
+    /managed worktree/iu,
+    /clean[^\n]*(?:state|tracked|untracked)/iu,
+    /main[^\n]*master/iu,
     /(?:no|无)[^\n]*(?:delete|删除)/iu,
     /(?:no|无)[^\n]*(?:arbitrary shell|任意 Shell)/iu,
     /(?:no|无)[^\n]*(?:automatic commit|自动 commit)/iu,
     /(?:no|无)[^\n]*(?:automatic push|自动 push)/iu,
     /(?:no|无)[^\n]*(?:outside|工作区外)/iu,
+    /(?:no|无)[^\n]*(?:arbitrary Git|任意 Git)/iu,
+    /(?:no|无)[^\n]*(?:arbitrary.*gh|任意.*gh)/iu,
+    /(?:no|无)[^\n]*(?:detached|分离)/iu,
     /https:\/\/<ngrok-domain>\/<MCP_PATH>/u,
   ]) {
     assert.match(readme, expected);
