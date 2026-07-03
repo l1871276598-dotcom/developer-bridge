@@ -1,6 +1,6 @@
 # Developer Bridge
 
-Developer Bridge connects ChatGPT to one explicitly authorized local Git project through a small, auditable MCP bridge. It supports protected file editing, fixed validation, controlled Git publishing, controlled Draft PR creation, and controlled branch/worktree changes without arbitrary Shell, Git, or GitHub CLI arguments.
+Developer Bridge connects ChatGPT to one explicitly authorized local Git project through a small, auditable MCP bridge. It supports protected file editing, fixed validation, controlled Git publishing, controlled Draft PR creation, controlled origin/main synchronization, and controlled branch/worktree changes without arbitrary Shell, Git, or GitHub CLI arguments.
 
 ## Architecture
 
@@ -89,6 +89,12 @@ Explicit Git and GitHub publishing tools:
 - `git_push_current_branch`: push only the current authorized non-protected branch to the same branch on `origin`.
 - `github_pr_create_draft`: create a GitHub Draft PR using fixed `gh pr create --draft --fill` arguments only. The current branch must be clean, track `origin/<same-branch>`, and exactly match its pushed remote-tracking commit.
 
+Controlled synchronization tools:
+
+- `git_fetch_origin_main`: fetch only `origin/main` from an HTTPS GitHub origin; arbitrary remotes, tags, submodules, and refspecs are not accepted.
+- `git_merge_origin_main`: prepare a confirmed `--no-commit --no-ff` merge of `origin/main` into the clean current feature branch. A successful merge still requires a separate `git_commit`; conflicts remain available for explicit resolution.
+- `git_merge_abort`: abort the active controlled merge after explicit confirmation.
+
 Controlled branch and worktree tools:
 
 - `git_branch_list`: list local branches and whether they are current or checked out.
@@ -100,13 +106,16 @@ Controlled branch and worktree tools:
 
 ## Safety boundary
 
-- No delete, prune, move, merge, rebase, tag, reset, clean, force, PR merge, PR close, or Ready-for-review operations.
+- No delete, prune, move, rebase, tag, reset, clean, force, PR merge, PR close, or Ready-for-review operations.
 - No detached `HEAD`, and no authorization or mutation of `main` or `master`.
 - Branch/worktree switching requires a clean tracked and untracked state and no merge, rebase, cherry-pick, revert, or bisect in progress.
+- Fetch is fixed to HTTPS GitHub `origin/main`; merge is fixed to `origin/main` into the current authorized feature branch.
+- Controlled merge disables hooks and signing, rejects external merge drivers and filters, and never creates a commit automatically.
+- Rebase is intentionally not exposed because it rewrites published history and can require force push.
 - No caller-controlled worktree path and no arbitrary Git or `gh` arguments.
 - Draft PR creation accepts no caller arguments, requires a GitHub `origin`, disables interactive prompts, and uses repository defaults for title, body, and base branch.
 - Repository and user Git hooks are disabled for controlled mutations; commit signing is disabled.
-- Configured external `clean`, `smudge`, or `process` filters cause staging and checkout operations to fail closed.
+- Configured external `clean`, `smudge`, or `process` filters cause staging, checkout, and merge operations to fail closed.
 - No arbitrary Shell access.
 - No automatic commit or automatic push: both require a separate explicit tool call, and push is limited to the current branch on `origin`.
 - No file access outside the currently authorized workspace or managed worktree.

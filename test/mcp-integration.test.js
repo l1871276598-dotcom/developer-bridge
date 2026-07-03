@@ -14,6 +14,29 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 const projectRoot = path.resolve(import.meta.dirname, "..");
 const execFileAsync = promisify(execFile);
 
+const APPROVED_TOOLS = [
+  "list_files",
+  "read_file",
+  "write_file",
+  "git_stage",
+  "git_commit",
+  "git_push_current_branch",
+  "github_pr_create_draft",
+  "run_validation",
+  "git_branch_list",
+  "git_branch_create",
+  "git_branch_switch",
+  "git_worktree_list",
+  "git_worktree_create",
+  "git_worktree_switch",
+  "git_status",
+  "git_diff",
+  "run_tests",
+  "git_fetch_origin_main",
+  "git_merge_origin_main",
+  "git_merge_abort",
+];
+
 function client() {
   return new Client({ name: "p0-integration-test", version: "1.0.0" }, { capabilities: {} });
 }
@@ -40,25 +63,7 @@ async function prepareWorkspace(workspace) {
 
 async function exerciseAllTools(mcpClient) {
   const tools = await mcpClient.listTools();
-  assert.deepEqual(tools.tools.map(({ name }) => name), [
-    "list_files",
-    "read_file",
-    "write_file",
-    "git_stage",
-    "git_commit",
-    "git_push_current_branch",
-    "github_pr_create_draft",
-    "run_validation",
-    "git_branch_list",
-    "git_branch_create",
-    "git_branch_switch",
-    "git_worktree_list",
-    "git_worktree_create",
-    "git_worktree_switch",
-    "git_status",
-    "git_diff",
-    "run_tests",
-  ]);
+  assert.deepEqual(tools.tools.map(({ name }) => name), APPROVED_TOOLS);
   const branches = await mcpClient.callTool({ name: "git_branch_list", arguments: {} });
   assert.deepEqual(JSON.parse(branches.content[0].text).branches.map(({ branch }) => branch), ["feat/test"]);
   const worktrees = await mcpClient.callTool({ name: "git_worktree_list", arguments: {} });
@@ -106,7 +111,7 @@ async function waitForHealth(port) {
   throw new Error("HTTP server did not become healthy");
 }
 
-test("stdio transport scans and runs all seventeen approved tools", async (t) => {
+test("stdio transport scans and runs all twenty approved tools", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-stdio-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
   await prepareWorkspace(workspace);
@@ -127,7 +132,7 @@ test("stdio transport scans and runs all seventeen approved tools", async (t) =>
   assert.doesNotMatch(stderr, new RegExp(workspace));
 });
 
-test("HTTP transport scans and runs all seventeen approved tools without leaking route", async (t) => {
+test("HTTP transport scans and runs all twenty approved tools without leaking route", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-http-"));
   await prepareWorkspace(workspace);
   const port = await freePort();

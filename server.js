@@ -1,6 +1,6 @@
 import process from "process";
 
-import { createBridgeCore } from "./src/bridge-core.js";
+import { createBridgeWithSyncTools } from "./src/bridge-with-sync-tools.js";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -20,7 +20,7 @@ if (typeof workspace !== "string" || workspace.length === 0) {
 
 let bridge;
 try {
-  bridge = await createBridgeCore(workspace);
+  bridge = await createBridgeWithSyncTools(workspace);
 } catch (error) {
   console.error(`Configuration error: ${error instanceof Error ? error.message : "invalid workspace"}. Set DEVELOPER_BRIDGE_WORKSPACE to an existing authorized project directory.`);
   process.exit(1);

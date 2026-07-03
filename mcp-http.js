@@ -2,7 +2,7 @@ import express from "express";
 import process from "process";
 import { randomUUID } from "crypto";
 
-import { createBridgeCore } from "./src/bridge-core.js";
+import { createBridgeWithSyncTools as createBridgeCore } from "./src/bridge-with-sync-tools.js";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";

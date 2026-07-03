@@ -3,6 +3,9 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
+import { GIT_MERGE_TOOL_DEFINITIONS } from "../src/git-merge-tools.js";
+import { GIT_SYNC_TOOL_DEFINITIONS } from "../src/git-sync-tools.js";
+
 const projectRoot = path.resolve(import.meta.dirname, "..");
 
 async function exists(relativePath) {
@@ -16,6 +19,19 @@ test("package scripts expose the HTTP default, stdio alternative, and complete t
     "start:stdio": "node server.js",
     test: "node --test test/*.test.js",
   });
+});
+
+test("controlled sync tools use strict fixed schemas", () => {
+  const tools = [...GIT_SYNC_TOOL_DEFINITIONS, ...GIT_MERGE_TOOL_DEFINITIONS];
+  assert.deepEqual(tools.map(({ name }) => name), [
+    "git_fetch_origin_main",
+    "git_merge_origin_main",
+    "git_merge_abort",
+  ]);
+  for (const tool of tools) {
+    assert.equal(tool.inputSchema.type, "object");
+    assert.equal(tool.inputSchema.additionalProperties, false);
+  }
 });
 
 test("obsolete implementations, scratch files, and empty source directories are absent", async () => {
