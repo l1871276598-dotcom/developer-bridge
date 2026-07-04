@@ -76,7 +76,7 @@ function orderedToolSet(definitions, env) {
 export async function createBridgeWithSyncTools(workspace, logger, options = {}) {
   const baseLogger = logger ?? ((line) => console.error(line));
   const auditLogger = createOperatorAuditLogger(baseLogger, options.operatorIdentity);
-  const env = options.env || process.env;
+  const env = options.env ?? process.env;
   const workspaceContext = await createWorkspaceContext(workspace, {
     managedRoot: env.DEVELOPER_BRIDGE_WORKTREE_ROOT,
   });
