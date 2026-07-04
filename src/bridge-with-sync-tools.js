@@ -26,6 +26,7 @@ import {
   handleGitSyncTool,
   runFixedGit,
 } from "./git-sync-tools.js";
+import { createWorkspaceContext } from "./workspace-context.js";
 
 function textResult(text) {
   return { content: [{ type: "text", text }] };
@@ -75,7 +76,11 @@ function orderedToolSet(definitions, env) {
 export async function createBridgeWithSyncTools(workspace, logger, options = {}) {
   const baseLogger = logger ?? ((line) => console.error(line));
   const auditLogger = createOperatorAuditLogger(baseLogger, options.operatorIdentity);
-  const core = await createBridgeCore(workspace, auditLogger);
+  const env = options.env ?? process.env;
+  const workspaceContext = await createWorkspaceContext(workspace, {
+    managedRoot: env.DEVELOPER_BRIDGE_WORKTREE_ROOT,
+  });
+  const core = await createBridgeCore(workspace, auditLogger, { workspaceContext });
   const identity = await repositoryIdentity(workspace);
   const fetchTool = GIT_SYNC_TOOL_DEFINITIONS.find(({ name }) => name === "git_fetch_origin_main");
   const tools = orderedToolSet([
@@ -84,7 +89,7 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
     ...GIT_MERGE_TOOL_DEFINITIONS,
     ...GITHUB_PR_MERGE_TOOL_DEFINITIONS,
     ...CONTROLLED_ENGINEERING_TOOL_DEFINITIONS,
-  ], options.env || process.env);
+  ], env);
   let activeRoot = identity.root;
   let queue = Promise.resolve();
 
@@ -101,15 +106,12 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
     }
   }
 
-  async function refreshRootAfterWorktreeSwitch(branch) {
-    const listed = await core.callTool("git_worktree_list", {});
-    if (listed.isError) throw new Error("Unable to refresh the authorized worktree.");
-    const parsed = JSON.parse(resultText(listed));
-    const match = parsed.worktrees?.find((item) => item.branch === branch);
-    if (!match || typeof match.root !== "string") {
-      throw new Error("The switched worktree is not present in the authorized list.");
+  async function refreshRootAfterWorktreeSwitch(result, branch) {
+    const parsed = JSON.parse(resultText(result));
+    if (parsed.branch !== branch || typeof parsed.root !== "string") {
+      throw new Error("The worktree switch result did not contain the requested target.");
     }
-    const next = await repositoryIdentity(match.root);
+    const next = await repositoryIdentity(parsed.root);
     if (next.commonDir !== identity.commonDir) {
       throw new Error("The switched worktree belongs to another repository.");
     }
@@ -139,7 +141,7 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
                 : isGitHubPrMergeTool(name)
                   ? await handleGitHubPrMergeTool(name, args, activeRoot)
                   : await handleControlledEngineeringTool(name, args, activeRoot, {
-                    env: options.env || process.env,
+                    env,
                     runCommand: options.controlledRunCommand,
                   });
             auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
@@ -152,9 +154,8 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
 
         const result = await core.callTool(name, args);
         if (name === "git_worktree_switch" && !result.isError) {
-          activeRoot = null;
           try {
-            await refreshRootAfterWorktreeSwitch(args.branch);
+            await refreshRootAfterWorktreeSwitch(result, args.branch);
           } catch {
             return failureResult();
           }
