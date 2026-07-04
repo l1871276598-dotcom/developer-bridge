@@ -18,6 +18,19 @@ const ALLOWED_TASK_TYPES = new Set([
   "reflection.apply",
   "reflection.record",
 ]);
+const SAFE_CLI_ERROR_CODES = new Set([
+  "request_failed",
+  "invalid_memory_root",
+  "memory_store_validation_failed",
+]);
+
+export class LaosMemoryToolError extends Error {
+  constructor(code) {
+    super("LAOS task failed");
+    this.name = "LaosMemoryToolError";
+    this.code = code;
+  }
+}
 
 export const LAOS_MEMORY_TOOL_DEFINITION = Object.freeze({
   name: "laos_memory_task",
@@ -41,6 +54,10 @@ export const LAOS_MEMORY_TOOL_DEFINITION = Object.freeze({
   },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
 });
+
+function fail(code) {
+  throw new LaosMemoryToolError(code);
+}
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -96,21 +113,21 @@ async function resolveCli(codeRoot) {
 
 function normalizeTask(args) {
   if (!isPlainObject(args) || Object.keys(args).some((key) => key !== "task")) {
-    throw new Error("Arguments must contain only task");
+    fail("invalid_laos_task");
   }
   const task = args.task;
-  if (!isPlainObject(task)) throw new Error("task must be an object");
+  if (!isPlainObject(task)) fail("invalid_laos_task");
   const keys = Object.keys(task);
   if (keys.some((key) => !["type", "workspace", "input"].includes(key))) {
-    throw new Error("task contains an unsupported field");
+    fail("invalid_laos_task");
   }
-  if (!ALLOWED_TASK_TYPES.has(task.type)) throw new Error("LAOS task type is not allowlisted");
+  if (!ALLOWED_TASK_TYPES.has(task.type)) fail("invalid_laos_task");
   if (task.workspace !== undefined && !["personal", "work"].includes(task.workspace)) {
-    throw new Error("LAOS workspace is invalid");
+    fail("invalid_laos_task");
   }
-  if (!isPlainObject(task.input)) throw new Error("LAOS task input must be an object");
+  if (!isPlainObject(task.input)) fail("invalid_laos_task");
   const encoded = JSON.stringify(task);
-  if (Buffer.byteLength(encoded, "utf8") > MAX_TASK_BYTES) throw new Error("LAOS task exceeds the fixed size limit");
+  if (Buffer.byteLength(encoded, "utf8") > MAX_TASK_BYTES) fail("invalid_laos_task");
   return encoded;
 }
 
@@ -161,7 +178,7 @@ function runFixed(command, args, options) {
 
     child.stdout.on("data", (chunk) => collect(stdout, chunk, "stdout"));
     child.stderr.on("data", (chunk) => collect(stderr, chunk, "stderr"));
-    child.once("error", () => finish(new Error("LAOS command could not be started")));
+    child.once("error", () => finish(new LaosMemoryToolError("laos_command_unavailable")));
     child.once("close", (exitCode, signal) => finish(null, {
       exitCode,
       signal,
@@ -178,6 +195,16 @@ function runFixed(command, args, options) {
     }, TIMEOUT_MS);
     timer.unref();
   });
+}
+
+function cliErrorCode(stderr) {
+  if (typeof stderr !== "string") return "request_failed";
+  try {
+    const code = JSON.parse(stderr.trim())?.error?.code;
+    return SAFE_CLI_ERROR_CODES.has(code) ? code : "request_failed";
+  } catch {
+    return "request_failed";
+  }
 }
 
 function redact(value, roots) {
@@ -219,19 +246,16 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
         [cli, "--root", dataRoot, "--state-dir", stateDir, "--task-json", taskJson],
         { cwd: codeRoot, env: safeEnvironment(env), timeoutMs: TIMEOUT_MS },
       );
-      if (
-        result?.exitCode !== 0 ||
-        result?.timedOut === true ||
-        result?.outputLimitExceeded === true ||
-        typeof result?.stdout !== "string"
-      ) {
-        throw new Error("LAOS task failed");
-      }
+      if (result?.timedOut === true) fail("laos_task_timeout");
+      if (result?.outputLimitExceeded === true) fail("laos_output_limit_exceeded");
+      if (result?.exitCode !== 0) fail(cliErrorCode(result?.stderr));
+      if (typeof result?.stdout !== "string") fail("laos_malformed_response");
+
       let payload;
       try {
         payload = JSON.parse(result.stdout.trim());
       } catch {
-        throw new Error("LAOS returned malformed JSON");
+        fail("laos_malformed_response");
       }
       return {
         text: JSON.stringify(redact(payload, [

@@ -26,7 +26,7 @@ import {
   handleGitSyncTool,
   runFixedGit,
 } from "./git-sync-tools.js";
-import { createLaosMemoryTool } from "./laos-memory-tool.js";
+import { LaosMemoryToolError, createLaosMemoryTool } from "./laos-memory-tool.js";
 import { createWorkspaceContext } from "./workspace-context.js";
 
 function textResult(text) {
@@ -35,6 +35,19 @@ function textResult(text) {
 
 function failureResult() {
   return { content: [{ type: "text", text: "Tool operation failed" }], isError: true };
+}
+
+function laosFailureResult(error) {
+  const code = error instanceof LaosMemoryToolError
+    ? error.code
+    : "tool_operation_failed";
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({ error: { code, message: "LAOS task failed." } }),
+    }],
+    isError: true,
+  };
 }
 
 function resultText(result) {
@@ -136,9 +149,9 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
             const result = await laosMemoryTool.call(args);
             auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
             return textResult(result.text);
-          } catch {
+          } catch (error) {
             auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
-            return failureResult();
+            return laosFailureResult(error);
           }
         }
 
