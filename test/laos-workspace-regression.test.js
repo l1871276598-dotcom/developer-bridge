@@ -115,3 +115,42 @@ test("run_validation returns the failed step with bounded stdout and stderr", as
     allowFailure: true,
   }]);
 });
+
+test("run_validation uses unittest discovery for a unittest project", async (t) => {
+  const fixture = await repository(t);
+  await mkdir(path.join(fixture.managed, "tests"));
+  await writeFile(
+    path.join(fixture.managed, "tests", "test_example.py"),
+    [
+      "import unittest",
+      "",
+      "class ExampleTests(unittest.TestCase):",
+      "    def test_example(self):",
+      "        self.assertTrue(True)",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const snapshot = {
+    root: fixture.managed,
+    branch: "feat/laos",
+    commonDir: fixture.commonDir,
+  };
+  const calls = [];
+  const runCommand = async (command, args, options) => {
+    calls.push({ command, args, cwd: options.cwd, allowFailure: options.allowFailure });
+    return { exitCode: 0, signal: null, stdout: "", stderr: "" };
+  };
+
+  const result = await handleGitWriteTool("run_validation", {}, snapshot, { runCommand });
+  const payload = JSON.parse(result.text);
+  assert.equal(payload.passed, true);
+  assert.equal(payload.failed_step, null);
+  assert.equal(payload.results[0].step, "unittest");
+  assert.deepEqual(calls[0], {
+    command: "python3",
+    args: ["-m", "unittest", "discover", "-s", "tests", "-p", "test*.py", "-v"],
+    cwd: fixture.managed,
+    allowFailure: true,
+  });
+});
