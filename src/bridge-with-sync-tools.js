@@ -26,6 +26,7 @@ import {
   handleGitSyncTool,
   runFixedGit,
 } from "./git-sync-tools.js";
+import { createLaosMemoryTool } from "./laos-memory-tool.js";
 import { createWorkspaceContext } from "./workspace-context.js";
 
 function textResult(text) {
@@ -83,7 +84,7 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
   const core = await createBridgeCore(workspace, auditLogger, { workspaceContext });
   const identity = await repositoryIdentity(workspace);
   const fetchTool = GIT_SYNC_TOOL_DEFINITIONS.find(({ name }) => name === "git_fetch_origin_main");
-  const tools = orderedToolSet([
+  const baseTools = orderedToolSet([
     ...core.tools,
     fetchTool,
     ...GIT_MERGE_TOOL_DEFINITIONS,
@@ -91,6 +92,12 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
     ...CONTROLLED_ENGINEERING_TOOL_DEFINITIONS,
   ], env);
   let activeRoot = identity.root;
+  const laosMemoryTool = await createLaosMemoryTool(env, () => activeRoot, {
+    runCommand: options.laosRunCommand,
+  });
+  const tools = Object.freeze(laosMemoryTool
+    ? [...baseTools, laosMemoryTool.definition]
+    : baseTools);
   let queue = Promise.resolve();
 
   function serialize(operation) {
@@ -122,6 +129,19 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
     tools,
     callTool(name, args = {}) {
       return serialize(async () => {
+        if (laosMemoryTool && name === laosMemoryTool.definition.name) {
+          const started = Date.now();
+          try {
+            await assertActiveIdentity();
+            const result = await laosMemoryTool.call(args);
+            auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
+            return textResult(result.text);
+          } catch {
+            auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
+            return failureResult();
+          }
+        }
+
         if (
           name === "git_fetch_origin_main" ||
           isGitMergeTool(name) ||
