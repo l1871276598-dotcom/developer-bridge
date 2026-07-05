@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -21,6 +21,7 @@ async function fixture(t) {
   const dataRoot = path.join(base, "data");
   const stateDir = path.join(base, "state");
   await Promise.all([mkdir(workspace), mkdir(dataRoot), mkdir(stateDir)]);
+  await writeFile(path.join(dataRoot, ".research-agent-root"), "{}\n", "utf8");
   await mkdir(path.join(workspace, "src"));
   await writeFile(path.join(workspace, "src", "laos.py"), "print('fixture')\n", "utf8");
   await git(workspace, "init", "--quiet", "-b", "feat/laos-data");
@@ -149,6 +150,71 @@ test("does not advertise the LAOS task without both roots and rejects partial co
       env: env(item, { LAOS_STATE_DIR: undefined }),
     }),
     /LAOS_DATA_ROOT and LAOS_STATE_DIR must be configured together/u,
+  );
+});
+
+test("rejects a LAOS data root without the ResearchAgent marker before publishing tools", async (t) => {
+  const item = await fixture(t);
+  await unlink(path.join(item.dataRoot, ".research-agent-root"));
+
+  await assert.rejects(
+    createBridgeWithSyncTools(item.workspace, () => {}, {
+      operatorIdentity,
+      env: env(item),
+    }),
+    /LAOS_DATA_ROOT is not an initialized ResearchAgent data root/u,
+  );
+});
+
+test("rejects the memory subdirectory as the LAOS data root", async (t) => {
+  const item = await fixture(t);
+  const memoryDir = path.join(item.dataRoot, "memory");
+  await mkdir(memoryDir);
+
+  await assert.rejects(
+    createBridgeWithSyncTools(item.workspace, () => {}, {
+      operatorIdentity,
+      env: env(item, { LAOS_DATA_ROOT: memoryDir }),
+    }),
+    /LAOS_DATA_ROOT is not an initialized ResearchAgent data root/u,
+  );
+});
+
+test("rejects the LAOS code repository as the data root", async (t) => {
+  const item = await fixture(t);
+  await writeFile(path.join(item.workspace, ".research-agent-root"), "{}\n", "utf8");
+
+  await assert.rejects(
+    createBridgeWithSyncTools(item.workspace, () => {}, {
+      operatorIdentity,
+      env: env(item, { LAOS_DATA_ROOT: item.workspace }),
+    }),
+    /Developer Bridge runtime, LAOS code, data and state directories must be separate/u,
+  );
+});
+
+test("rejects overlapping LAOS data and state directories", async (t) => {
+  const item = await fixture(t);
+
+  await assert.rejects(
+    createBridgeWithSyncTools(item.workspace, () => {}, {
+      operatorIdentity,
+      env: env(item, { LAOS_STATE_DIR: item.dataRoot }),
+    }),
+    /LAOS data and state directories must not overlap/u,
+  );
+});
+
+test("rejects an authorized workspace without the fixed LAOS CLI before publishing tools", async (t) => {
+  const item = await fixture(t);
+  await unlink(path.join(item.workspace, "src", "laos.py"));
+
+  await assert.rejects(
+    createBridgeWithSyncTools(item.workspace, () => {}, {
+      operatorIdentity,
+      env: env(item),
+    }),
+    /authorized workspace does not contain a safe LAOS CLI/u,
   );
 });
 

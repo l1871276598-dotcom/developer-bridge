@@ -111,6 +111,29 @@ async function resolveCli(codeRoot) {
   return cli;
 }
 
+async function requireDataRoot(dataRoot) {
+  const marker = path.join(dataRoot, ".research-agent-root");
+  const markerStat = await lstat(marker).catch(() => null);
+  if (!markerStat?.isFile() || markerStat.isSymbolicLink()) {
+    throw new Error("LAOS_DATA_ROOT is not an initialized ResearchAgent data root");
+  }
+  const canonical = await realpath(marker);
+  if (!isContained(dataRoot, canonical) || canonical !== marker) {
+    throw new Error("LAOS_DATA_ROOT is not an initialized ResearchAgent data root");
+  }
+}
+
+function requireSeparatedRoots(runtimeRoot, codeRoot, dataRoot, stateDir) {
+  const roots = [runtimeRoot, codeRoot, dataRoot, stateDir];
+  for (let left = 0; left < roots.length; left += 1) {
+    for (let right = left + 1; right < roots.length; right += 1) {
+      if (overlaps(roots[left], roots[right])) {
+        throw new Error("Developer Bridge runtime, LAOS code, data and state directories must be separate");
+      }
+    }
+  }
+}
+
 function normalizeTask(args) {
   if (!isPlainObject(args) || Object.keys(args).some((key) => key !== "task")) {
     fail("invalid_laos_task");
@@ -229,7 +252,12 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
 
   const dataRoot = await canonicalDirectory(env.LAOS_DATA_ROOT, "LAOS_DATA_ROOT");
   const stateDir = await canonicalDirectory(env.LAOS_STATE_DIR, "LAOS_STATE_DIR");
+  await requireDataRoot(dataRoot);
   if (overlaps(dataRoot, stateDir)) throw new Error("LAOS data and state directories must not overlap");
+  const runtimeRoot = await canonicalDirectory(path.resolve(import.meta.dirname, ".."), "Developer Bridge runtime");
+  const initialCodeRoot = await canonicalDirectory(getCodeRoot(), "Authorized workspace");
+  requireSeparatedRoots(runtimeRoot, initialCodeRoot, dataRoot, stateDir);
+  await resolveCli(initialCodeRoot);
   const runner = options.runCommand || runFixed;
 
   return Object.freeze({
@@ -237,9 +265,7 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
     async call(args) {
       const taskJson = normalizeTask(args);
       const codeRoot = await canonicalDirectory(getCodeRoot(), "Authorized workspace");
-      if (overlaps(codeRoot, dataRoot) || overlaps(codeRoot, stateDir)) {
-        throw new Error("LAOS code, data and state directories must be separate");
-      }
+      requireSeparatedRoots(runtimeRoot, codeRoot, dataRoot, stateDir);
       const cli = await resolveCli(codeRoot);
       const result = await runner(
         process.platform === "win32" ? "python" : "python3",

@@ -21,6 +21,7 @@ async function fixture(t) {
   const dataRoot = path.join(base, "data");
   const stateDir = path.join(base, "state");
   await Promise.all([mkdir(workspace), mkdir(dataRoot), mkdir(stateDir)]);
+  await writeFile(path.join(dataRoot, ".research-agent-root"), "{}\n", "utf8");
   await mkdir(path.join(workspace, "src"));
   await writeFile(path.join(workspace, "src", "laos.py"), "print('fixture')\n", "utf8");
   await git(workspace, "init", "--quiet", "-b", "feat/laos-errors");
