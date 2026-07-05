@@ -26,6 +26,7 @@ import {
   handleGitSyncTool,
   runFixedGit,
 } from "./git-sync-tools.js";
+import { createLaosCheckpointTools } from "./laos-checkpoint-tools.js";
 import { LaosMemoryToolError, createLaosMemoryTool } from "./laos-memory-tool.js";
 import { createWorkspaceContext } from "./workspace-context.js";
 
@@ -108,9 +109,14 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
   const laosMemoryTool = await createLaosMemoryTool(env, () => activeRoot, {
     runCommand: options.laosRunCommand,
   });
-  const tools = Object.freeze(laosMemoryTool
-    ? [...baseTools, laosMemoryTool.definition]
-    : baseTools);
+  const laosCheckpointTools = await createLaosCheckpointTools(env, identity.root, {
+    runCommand: options.laosCheckpointRunCommand,
+  });
+  const optionalTools = [
+    ...(laosMemoryTool ? [laosMemoryTool.definition] : []),
+    ...(laosCheckpointTools ? laosCheckpointTools.definitions : []),
+  ];
+  const tools = Object.freeze(optionalTools.length ? [...baseTools, ...optionalTools] : baseTools);
   let queue = Promise.resolve();
 
   function serialize(operation) {
@@ -140,6 +146,7 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
 
   return {
     tools,
+    instructions: laosCheckpointTools?.instructions,
     callTool(name, args = {}) {
       return serialize(async () => {
         if (laosMemoryTool && name === laosMemoryTool.definition.name) {
@@ -147,6 +154,19 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
           try {
             await assertActiveIdentity();
             const result = await laosMemoryTool.call(args);
+            auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
+            return textResult(result.text);
+          } catch (error) {
+            auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
+            return laosFailureResult(error);
+          }
+        }
+
+        if (laosCheckpointTools && laosCheckpointTools.definitions.some((definition) => definition.name === name)) {
+          const started = Date.now();
+          try {
+            await assertActiveIdentity();
+            const result = await laosCheckpointTools.call(name, args);
             auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
             return textResult(result.text);
           } catch (error) {
