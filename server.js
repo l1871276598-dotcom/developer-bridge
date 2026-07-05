@@ -35,9 +35,13 @@ try {
   process.exit(1);
 }
 
+const serverOptions = {
+  capabilities: { tools: {} },
+  ...(bridge.instructions ? { instructions: bridge.instructions } : {}),
+};
 const server = new Server(
   { name: "developer-bridge", version: "1.0.0" },
-  { capabilities: { tools: {} } }
+  serverOptions,
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: bridge.tools }));
