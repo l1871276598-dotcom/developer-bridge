@@ -26,6 +26,9 @@ import {
   handleGitSyncTool,
   runFixedGit,
 } from "./git-sync-tools.js";
+import { createLaosCheckpointTools } from "./laos-checkpoint-tools.js";
+import { LaosMemoryToolError, createLaosMemoryTool } from "./laos-memory-tool.js";
+import { createStructuredGitTools } from "./structured-git-tools.js";
 import { createWorkspaceContext } from "./workspace-context.js";
 
 function textResult(text) {
@@ -34,6 +37,19 @@ function textResult(text) {
 
 function failureResult() {
   return { content: [{ type: "text", text: "Tool operation failed" }], isError: true };
+}
+
+function laosFailureResult(error) {
+  const code = error instanceof LaosMemoryToolError
+    ? error.code
+    : "tool_operation_failed";
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({ error: { code, message: "LAOS task failed." } }),
+    }],
+    isError: true,
+  };
 }
 
 function resultText(result) {
@@ -83,7 +99,7 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
   const core = await createBridgeCore(workspace, auditLogger, { workspaceContext });
   const identity = await repositoryIdentity(workspace);
   const fetchTool = GIT_SYNC_TOOL_DEFINITIONS.find(({ name }) => name === "git_fetch_origin_main");
-  const tools = orderedToolSet([
+  const baseTools = orderedToolSet([
     ...core.tools,
     fetchTool,
     ...GIT_MERGE_TOOL_DEFINITIONS,
@@ -91,6 +107,19 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
     ...CONTROLLED_ENGINEERING_TOOL_DEFINITIONS,
   ], env);
   let activeRoot = identity.root;
+  const structuredGitTools = createStructuredGitTools(workspaceContext);
+  const laosMemoryTool = await createLaosMemoryTool(env, () => activeRoot, {
+    runCommand: options.laosRunCommand,
+  });
+  const laosCheckpointTools = await createLaosCheckpointTools(env, identity.root, {
+    runCommand: options.laosCheckpointRunCommand,
+  });
+  const optionalTools = [
+    ...structuredGitTools.definitions,
+    ...(laosMemoryTool ? [laosMemoryTool.definition] : []),
+    ...(laosCheckpointTools ? laosCheckpointTools.definitions : []),
+  ];
+  const tools = Object.freeze([...baseTools, ...optionalTools]);
   let queue = Promise.resolve();
 
   function serialize(operation) {
@@ -120,8 +149,48 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
 
   return {
     tools,
+    instructions: laosCheckpointTools?.instructions,
     callTool(name, args = {}) {
       return serialize(async () => {
+        if (structuredGitTools.isTool(name)) {
+          const started = Date.now();
+          try {
+            await assertActiveIdentity();
+            const result = await structuredGitTools.call(name, args);
+            auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
+            return textResult(result.text);
+          } catch {
+            auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
+            return failureResult();
+          }
+        }
+
+        if (laosMemoryTool && name === laosMemoryTool.definition.name) {
+          const started = Date.now();
+          try {
+            await assertActiveIdentity();
+            const result = await laosMemoryTool.call(args);
+            auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
+            return textResult(result.text);
+          } catch (error) {
+            auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
+            return laosFailureResult(error);
+          }
+        }
+
+        if (laosCheckpointTools && laosCheckpointTools.definitions.some((definition) => definition.name === name)) {
+          const started = Date.now();
+          try {
+            await assertActiveIdentity();
+            const result = await laosCheckpointTools.call(name, args);
+            auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
+            return textResult(result.text);
+          } catch (error) {
+            auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
+            return laosFailureResult(error);
+          }
+        }
+
         if (
           name === "git_fetch_origin_main" ||
           isGitMergeTool(name) ||

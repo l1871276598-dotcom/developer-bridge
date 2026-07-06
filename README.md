@@ -1,6 +1,6 @@
 # Developer Bridge
 
-Developer Bridge connects ChatGPT to one explicitly authorized local Git project through a small, auditable MCP bridge. It supports protected file editing, fixed validation, controlled Git publishing, controlled Draft PR creation, green-only squash merging, controlled origin/main synchronization, and controlled branch/worktree changes without arbitrary Shell, Git, or GitHub CLI arguments.
+Developer Bridge connects ChatGPT to one explicitly authorized local Git project through a small, auditable MCP bridge. It supports protected file editing, fixed validation, controlled Git publishing, controlled Draft PR creation, green-only squash merging, controlled origin/main synchronization, controlled branch/worktree changes, and an optional LAOS local-memory channel without arbitrary Shell, Git, or GitHub CLI arguments.
 
 ## Architecture
 
@@ -9,6 +9,8 @@ ChatGPT Web/App
 → HTTPS tunnel
 → Streamable HTTP MCP
 → authorized local workspace / selected managed worktree
+→ optional allowlisted LAOS CLI task
+→ external local memory data root + separate local state directory
 ```
 
 Each tool call uses one immutable authorization snapshot. After a successful controlled switch, later calls use the selected branch or managed worktree; an in-flight call continues using the snapshot with which it started.
@@ -32,6 +34,16 @@ export MCP_PATH="mcp-..."
 `DEVELOPER_BRIDGE_OPERATOR_ID` is required for HTTP and stdio startup. It accepts 1–64 ASCII letters, digits, dots, underscores, or hyphens. The Bridge reads it once at startup, records it in tool audit logs as `operator_id`, and records the fixed `operator_type=local-human`. MCP tool arguments cannot change this startup value.
 
 The workspace must be the real top-level directory of a repository on an attached branch other than `main` or `master`. `DEVELOPER_BRIDGE_WORKSPACE` should be restricted to a single project. Do not commit the secret local path or other secrets. `MCP_PATH` is a single private path segment, not a complete URL, and must not be hard-coded in the repository.
+
+For a LAOS dual-channel instance, authorize the LAOS code repository as the Git workspace and configure both external roots before startup:
+
+```bash
+export DEVELOPER_BRIDGE_WORKSPACE="/absolute/path/to/laos-code-repository"
+export LAOS_DATA_ROOT="/absolute/path/to/local-memory-data"
+export LAOS_STATE_DIR="/absolute/path/to/local-nonsynchronized-state"
+```
+
+Both LAOS directories must already exist, must be real local directories rather than symbolic links, and must not overlap each other or the Git workspace. `LAOS_STATE_DIR` should remain outside iCloud, OneDrive, and other synchronized folders. When both variables are present, the Bridge exposes `laos_memory_task`; when neither is present, the normal Git engineering tools remain available without the memory tool. Partial configuration fails closed at startup.
 
 Managed worktrees default to a sibling directory named `<repository>-worktrees`. A launcher may set a different absolute local directory:
 
@@ -93,6 +105,10 @@ Explicit Git and GitHub publishing tools:
 - `github_pr_create_draft`: create a GitHub Draft PR using fixed `gh pr create --draft --fill` arguments only. The current branch must be clean, track `origin/<same-branch>`, and exactly match its pushed remote-tracking commit.
 - `github_pr_merge_squash_if_green`: inspect the current branch PR and squash-merge it only when the worktree is clean, the branch is fully pushed, the PR head exactly matches local `HEAD`, at least one CI check exists, every reported check succeeds, and GitHub reports a clean merge state. A green Draft PR is marked Ready and fully rechecked before merging.
 
+LAOS dual-channel tool:
+
+- `laos_memory_task`: run one allowlisted LAOS JSON task through the fixed `src/laos.py` entrypoint while Git operations remain bound to the authorized repository. The task cannot choose filesystem paths, commands, executables, or environment variables. Returned code, data, and state paths are redacted.
+
 Controlled synchronization tools:
 
 - `git_fetch_origin_main`: fetch only `origin/main` from an HTTPS GitHub origin; arbitrary remotes, tags, submodules, and refspecs are not accepted.
@@ -110,7 +126,10 @@ Controlled branch and worktree tools:
 
 ## Safety boundary
 
-- Startup fails closed when `DEVELOPER_BRIDGE_OPERATOR_ID` is missing or invalid.
+- Startup fails closed when `DEVELOPER_BRIDGE_OPERATOR_ID` is missing or invalid, or when only one LAOS root is configured.
+- LAOS tasks are restricted to a fixed allowlist, a fixed Python executable name, the authorized workspace's `src/laos.py`, and separately configured data/state roots.
+- LAOS code, data, and state roots must be distinct; symbolic-link traversal and caller-selected filesystem paths are rejected.
+- LAOS subprocess input and output are bounded, execution has a fixed timeout, and absolute root paths are redacted from successful results.
 - No delete, prune, move, rebase, tag, reset, clean, force push, PR close, or branch deletion operations.
 - PR merging is limited to the current branch PR, fixed squash mode, an exact pushed head commit, at least one successful CI check, and a clean GitHub merge state; there is no admin, auto-merge, bypass, arbitrary PR number, or caller-selected merge method.
 - No detached `HEAD`, and no authorization or mutation of `main` or `master`.
@@ -124,7 +143,7 @@ Controlled branch and worktree tools:
 - Configured external `clean`, `smudge`, or `process` filters cause staging, checkout, and merge operations to fail closed.
 - No arbitrary Shell access.
 - No automatic commit or automatic push: both require a separate explicit tool call, and push is limited to the current branch on `origin`.
-- No file access outside the currently authorized workspace or managed worktree.
+- Normal file tools cannot access files outside the currently authorized workspace or managed worktree; only `laos_memory_task` can reach the separately configured LAOS roots through the fixed CLI contract.
 - No worktree deletion is exposed; cleanup remains a manual operator action outside the Bridge.
 
 Keep all local paths, tunnel addresses, credentials, and other secret values out of version control.
