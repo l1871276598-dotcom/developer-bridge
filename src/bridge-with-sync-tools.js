@@ -28,6 +28,7 @@ import {
 } from "./git-sync-tools.js";
 import { createLaosCheckpointTools } from "./laos-checkpoint-tools.js";
 import { LaosMemoryToolError, createLaosMemoryTool } from "./laos-memory-tool.js";
+import { createStructuredGitTools } from "./structured-git-tools.js";
 import { createWorkspaceContext } from "./workspace-context.js";
 
 function textResult(text) {
@@ -106,6 +107,7 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
     ...CONTROLLED_ENGINEERING_TOOL_DEFINITIONS,
   ], env);
   let activeRoot = identity.root;
+  const structuredGitTools = createStructuredGitTools(workspaceContext);
   const laosMemoryTool = await createLaosMemoryTool(env, () => activeRoot, {
     runCommand: options.laosRunCommand,
   });
@@ -113,10 +115,11 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
     runCommand: options.laosCheckpointRunCommand,
   });
   const optionalTools = [
+    ...structuredGitTools.definitions,
     ...(laosMemoryTool ? [laosMemoryTool.definition] : []),
     ...(laosCheckpointTools ? laosCheckpointTools.definitions : []),
   ];
-  const tools = Object.freeze(optionalTools.length ? [...baseTools, ...optionalTools] : baseTools);
+  const tools = Object.freeze([...baseTools, ...optionalTools]);
   let queue = Promise.resolve();
 
   function serialize(operation) {
@@ -149,6 +152,19 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
     instructions: laosCheckpointTools?.instructions,
     callTool(name, args = {}) {
       return serialize(async () => {
+        if (structuredGitTools.isTool(name)) {
+          const started = Date.now();
+          try {
+            await assertActiveIdentity();
+            const result = await structuredGitTools.call(name, args);
+            auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
+            return textResult(result.text);
+          } catch {
+            auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
+            return failureResult();
+          }
+        }
+
         if (laosMemoryTool && name === laosMemoryTool.definition.name) {
           const started = Date.now();
           try {

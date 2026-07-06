@@ -62,7 +62,7 @@ test("conditionally exposes one LAOS memory task bound to external data and stat
   });
 
   assert.equal(bridge.tools.at(-1).name, "laos_memory_task");
-  assert.equal(bridge.tools.length, 52);
+  assert.equal(bridge.tools.length, 55);
 
   const task = {
     type: "memory.create",
@@ -142,7 +142,7 @@ test("does not advertise the LAOS task without both roots and rejects partial co
     env: { DEVELOPER_BRIDGE_CAPABILITY_PROFILE: "controlled-engineering-v1" },
   });
   assert.equal(bridge.tools.some(({ name }) => name === "laos_memory_task"), false);
-  assert.equal(bridge.tools.length, 51);
+  assert.equal(bridge.tools.length, 54);
 
   await assert.rejects(
     createBridgeWithSyncTools(item.workspace, () => {}, {
