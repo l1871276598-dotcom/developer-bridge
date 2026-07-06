@@ -94,6 +94,53 @@ test("conditionally exposes one LAOS memory task bound to external data and stat
   assert.deepEqual(JSON.parse(calls[0].args[6]), task);
 });
 
+test("allows handoff.write LAOS tasks through the fixed CLI", async (t) => {
+  const item = await fixture(t);
+  const calls = [];
+  const bridge = await createBridgeWithSyncTools(item.workspace, () => {}, {
+    operatorIdentity,
+    env: env(item),
+    laosRunCommand: async (command, args, options) => {
+      calls.push({ command, args, options });
+      return {
+        exitCode: 0,
+        signal: null,
+        stdout: `${JSON.stringify({ ok: true, task_type: "handoff.write" })}\n`,
+        stderr: "",
+      };
+    },
+  });
+
+  const task = {
+    type: "handoff.write",
+    workspace: "personal",
+    input: {
+      project_slug: "skill-optimization",
+      content: "# Handoff\n",
+    },
+  };
+  const result = await bridge.callTool("laos_memory_task", { task });
+
+  assert.equal(result.isError, undefined, result.content?.[0]?.text);
+  assert.deepEqual(JSON.parse(result.content[0].text), {
+    ok: true,
+    task_type: "handoff.write",
+  });
+  assert.equal(calls.length, 1);
+  const taskJsonIndex = calls[0].args.indexOf("--task-json") + 1;
+  assert.notEqual(taskJsonIndex, 0);
+  assert.deepEqual(JSON.parse(calls[0].args[taskJsonIndex]), task);
+
+  const rejected = await bridge.callTool("laos_memory_task", {
+    task: { type: "handoff.read", workspace: "personal", input: {} },
+  });
+  assert.equal(rejected.isError, true);
+  assert.deepEqual(JSON.parse(rejected.content[0].text), {
+    error: { code: "invalid_laos_task", message: "LAOS task failed." },
+  });
+  assert.equal(calls.length, 1);
+});
+
 test("runs the fixed LAOS CLI as a real subprocess against external roots", async (t) => {
   const item = await fixture(t);
   await writeFile(path.join(item.workspace, "src", "laos.py"), `

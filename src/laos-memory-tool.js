@@ -10,6 +10,7 @@ const ALLOWED_TASK_TYPES = new Set([
   "memory.search",
   "memory.review",
   "context.build",
+  "handoff.write",
   "loop.reflect",
   "loop.suggest-policies",
   "loop.generate-candidate",
