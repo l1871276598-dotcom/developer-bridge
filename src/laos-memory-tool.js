@@ -6,11 +6,11 @@ const MAX_TASK_BYTES = 256 * 1024;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const TIMEOUT_MS = 120_000;
 const ALLOWED_TASK_TYPES = new Set([
+  "handoff.write",
   "memory.create",
   "memory.search",
   "memory.review",
   "context.build",
-  "handoff.write",
   "loop.reflect",
   "loop.suggest-policies",
   "loop.generate-candidate",
@@ -19,6 +19,15 @@ const ALLOWED_TASK_TYPES = new Set([
   "reflection.apply",
   "reflection.record",
 ]);
+
+export class LaosMemoryToolError extends Error {
+  constructor(code, detail) {
+    super(detail?.message || "LAOS task failed");
+    this.name = "LaosMemoryToolError";
+    this.code = code;
+    this.detail = detail || null;
+  }
+}
 
 export const LAOS_MEMORY_TOOL_DEFINITION = Object.freeze({
   name: "laos_memory_task",
@@ -42,6 +51,10 @@ export const LAOS_MEMORY_TOOL_DEFINITION = Object.freeze({
   },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
 });
+
+function fail(code, detail) {
+  throw new LaosMemoryToolError(code, detail);
+}
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -95,23 +108,46 @@ async function resolveCli(codeRoot) {
   return cli;
 }
 
+async function requireDataRoot(dataRoot) {
+  const marker = path.join(dataRoot, ".research-agent-root");
+  const markerStat = await lstat(marker).catch(() => null);
+  if (!markerStat?.isFile() || markerStat.isSymbolicLink()) {
+    throw new Error("LAOS_DATA_ROOT is not an initialized ResearchAgent data root");
+  }
+  const canonical = await realpath(marker);
+  if (!isContained(dataRoot, canonical) || canonical !== marker) {
+    throw new Error("LAOS_DATA_ROOT is not an initialized ResearchAgent data root");
+  }
+}
+
+function requireSeparatedRoots(runtimeRoot, codeRoot, dataRoot, stateDir) {
+  const roots = [runtimeRoot, codeRoot, dataRoot, stateDir];
+  for (let left = 0; left < roots.length; left += 1) {
+    for (let right = left + 1; right < roots.length; right += 1) {
+      if (overlaps(roots[left], roots[right])) {
+        throw new Error("Developer Bridge runtime, LAOS code, data and state directories must be separate");
+      }
+    }
+  }
+}
+
 function normalizeTask(args) {
   if (!isPlainObject(args) || Object.keys(args).some((key) => key !== "task")) {
-    throw new Error("Arguments must contain only task");
+    fail("invalid_laos_task");
   }
   const task = args.task;
-  if (!isPlainObject(task)) throw new Error("task must be an object");
+  if (!isPlainObject(task)) fail("invalid_laos_task");
   const keys = Object.keys(task);
   if (keys.some((key) => !["type", "workspace", "input"].includes(key))) {
-    throw new Error("task contains an unsupported field");
+    fail("invalid_laos_task");
   }
-  if (!ALLOWED_TASK_TYPES.has(task.type)) throw new Error("LAOS task type is not allowlisted");
+  if (!ALLOWED_TASK_TYPES.has(task.type)) fail("invalid_laos_task");
   if (task.workspace !== undefined && !["personal", "work"].includes(task.workspace)) {
-    throw new Error("LAOS workspace is invalid");
+    fail("invalid_laos_task");
   }
-  if (!isPlainObject(task.input)) throw new Error("LAOS task input must be an object");
+  if (!isPlainObject(task.input)) fail("invalid_laos_task");
   const encoded = JSON.stringify(task);
-  if (Buffer.byteLength(encoded, "utf8") > MAX_TASK_BYTES) throw new Error("LAOS task exceeds the fixed size limit");
+  if (Buffer.byteLength(encoded, "utf8") > MAX_TASK_BYTES) fail("invalid_laos_task");
   return encoded;
 }
 
@@ -162,7 +198,7 @@ function runFixed(command, args, options) {
 
     child.stdout.on("data", (chunk) => collect(stdout, chunk, "stdout"));
     child.stderr.on("data", (chunk) => collect(stderr, chunk, "stderr"));
-    child.once("error", () => finish(new Error("LAOS command could not be started")));
+    child.once("error", () => finish(new LaosMemoryToolError("laos_command_unavailable")));
     child.once("close", (exitCode, signal) => finish(null, {
       exitCode,
       signal,
@@ -179,6 +215,18 @@ function runFixed(command, args, options) {
     }, TIMEOUT_MS);
     timer.unref();
   });
+}
+
+function cliErrorDetail(stderr) {
+  if (typeof stderr !== "string" || stderr.length === 0) return null;
+  try {
+    const parsed = JSON.parse(stderr.trim());
+    if (parsed?.error) {
+      const code = typeof parsed.error.code === "string" ? parsed.error.code : "request_failed";
+      return { code, message: parsed.error.message || "LAOS task failed", stage: parsed.error.stage };
+    }
+  } catch {}
+  return null;
 }
 
 function redact(value, roots) {
@@ -203,7 +251,12 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
 
   const dataRoot = await canonicalDirectory(env.LAOS_DATA_ROOT, "LAOS_DATA_ROOT");
   const stateDir = await canonicalDirectory(env.LAOS_STATE_DIR, "LAOS_STATE_DIR");
+  await requireDataRoot(dataRoot);
   if (overlaps(dataRoot, stateDir)) throw new Error("LAOS data and state directories must not overlap");
+  const runtimeRoot = await canonicalDirectory(path.resolve(import.meta.dirname, ".."), "Developer Bridge runtime");
+  const initialCodeRoot = await canonicalDirectory(getCodeRoot(), "Authorized workspace");
+  requireSeparatedRoots(runtimeRoot, initialCodeRoot, dataRoot, stateDir);
+  await resolveCli(initialCodeRoot);
   const runner = options.runCommand || runFixed;
 
   return Object.freeze({
@@ -211,39 +264,27 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
     async call(args) {
       const taskJson = normalizeTask(args);
       const codeRoot = await canonicalDirectory(getCodeRoot(), "Authorized workspace");
-      if (overlaps(codeRoot, dataRoot) || overlaps(codeRoot, stateDir)) {
-        throw new Error("LAOS code, data and state directories must be separate");
-      }
+      requireSeparatedRoots(runtimeRoot, codeRoot, dataRoot, stateDir);
       const cli = await resolveCli(codeRoot);
       const result = await runner(
         process.platform === "win32" ? "python" : "python3",
         [cli, "--root", dataRoot, "--state-dir", stateDir, "--task-json", taskJson],
         { cwd: codeRoot, env: safeEnvironment(env), timeoutMs: TIMEOUT_MS },
       );
-      if (
-        result?.exitCode !== 0 ||
-        result?.timedOut === true ||
-        result?.outputLimitExceeded === true ||
-        typeof result?.stdout !== "string"
-      ) {
-        let detail = "LAOS task failed";
-        if (result?.timedOut) detail = "LAOS task timed out";
-        else if (result?.outputLimitExceeded) detail = "LAOS task output limit exceeded";
-        else if (typeof result?.stderr === "string" && result.stderr.length > 0) {
-          try {
-            const parsed = JSON.parse(result.stderr.trim());
-            if (parsed?.error) {
-              detail = JSON.stringify(parsed.error);
-            }
-          } catch {}
-        }
-        throw new Error(detail);
+      if (result?.timedOut === true) fail("laos_task_timeout");
+      if (result?.outputLimitExceeded === true) fail("laos_output_limit_exceeded");
+      if (result?.exitCode !== 0) {
+        const detail = cliErrorDetail(result?.stderr);
+        if (detail) fail(detail.code, detail);
+        fail("request_failed");
       }
+      if (typeof result?.stdout !== "string") fail("laos_malformed_response");
+
       let payload;
       try {
         payload = JSON.parse(result.stdout.trim());
       } catch {
-        throw new Error("LAOS returned malformed JSON");
+        fail("laos_malformed_response");
       }
       return {
         text: JSON.stringify(redact(payload, [

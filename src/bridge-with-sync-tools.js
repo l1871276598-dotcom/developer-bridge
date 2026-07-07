@@ -26,7 +26,9 @@ import {
   handleGitSyncTool,
   runFixedGit,
 } from "./git-sync-tools.js";
-import { createLaosMemoryTool } from "./laos-memory-tool.js";
+import { createLaosCheckpointTools } from "./laos-checkpoint-tools.js";
+import { LaosMemoryToolError, createLaosMemoryTool } from "./laos-memory-tool.js";
+import { createStructuredGitTools } from "./structured-git-tools.js";
 import { createWorkspaceContext } from "./workspace-context.js";
 
 function textResult(text) {
@@ -35,6 +37,19 @@ function textResult(text) {
 
 function failureResult() {
   return { content: [{ type: "text", text: "Tool operation failed" }], isError: true };
+}
+
+function laosFailureResult(error) {
+  const code = error instanceof LaosMemoryToolError
+    ? error.code
+    : "tool_operation_failed";
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({ error: { code, message: "LAOS task failed." } }),
+    }],
+    isError: true,
+  };
 }
 
 function resultText(result) {
@@ -92,12 +107,19 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
     ...CONTROLLED_ENGINEERING_TOOL_DEFINITIONS,
   ], env);
   let activeRoot = identity.root;
+  const structuredGitTools = createStructuredGitTools(workspaceContext);
   const laosMemoryTool = await createLaosMemoryTool(env, () => activeRoot, {
     runCommand: options.laosRunCommand,
   });
-  const tools = Object.freeze(laosMemoryTool
-    ? [...baseTools, laosMemoryTool.definition]
-    : baseTools);
+  const laosCheckpointTools = await createLaosCheckpointTools(env, identity.root, {
+    runCommand: options.laosCheckpointRunCommand,
+  });
+  const optionalTools = [
+    ...structuredGitTools.definitions,
+    ...(laosMemoryTool ? [laosMemoryTool.definition] : []),
+    ...(laosCheckpointTools ? laosCheckpointTools.definitions : []),
+  ];
+  const tools = Object.freeze([...baseTools, ...optionalTools]);
   let queue = Promise.resolve();
 
   function serialize(operation) {
@@ -127,8 +149,22 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
 
   return {
     tools,
+    instructions: laosCheckpointTools?.instructions,
     callTool(name, args = {}) {
       return serialize(async () => {
+        if (structuredGitTools.isTool(name)) {
+          const started = Date.now();
+          try {
+            await assertActiveIdentity();
+            const result = await structuredGitTools.call(name, args);
+            auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
+            return textResult(result.text);
+          } catch {
+            auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
+            return failureResult();
+          }
+        }
+
         if (laosMemoryTool && name === laosMemoryTool.definition.name) {
           const started = Date.now();
           try {
@@ -138,8 +174,21 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
             return textResult(result.text);
           } catch (error) {
             auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
-            const message = error instanceof Error ? error.message : "Tool operation failed";
-            return { content: [{ type: "text", text: message }], isError: true };
+            return laosFailureResult(error);
+          }
+        }
+
+        if (laosCheckpointTools && laosCheckpointTools.definitions.some((definition) => definition.name === name)) {
+          const tool = laosCheckpointTools.definitions.find((definition) => definition.name === name);
+          const started = Date.now();
+          try {
+            await assertActiveIdentity();
+            const result = await laosCheckpointTools.call(name, args);
+            auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
+            return textResult(result.text);
+          } catch {
+            auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
+            return failureResult();
           }
         }
 
