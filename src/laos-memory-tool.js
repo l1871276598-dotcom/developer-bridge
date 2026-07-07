@@ -10,6 +10,7 @@ const ALLOWED_TASK_TYPES = new Set([
   "memory.search",
   "memory.review",
   "context.build",
+  "handoff.write",
   "loop.reflect",
   "loop.suggest-policies",
   "loop.generate-candidate",
@@ -18,17 +19,13 @@ const ALLOWED_TASK_TYPES = new Set([
   "reflection.apply",
   "reflection.record",
 ]);
-const SAFE_CLI_ERROR_CODES = new Set([
-  "request_failed",
-  "invalid_memory_root",
-  "memory_store_validation_failed",
-]);
 
 export class LaosMemoryToolError extends Error {
-  constructor(code) {
-    super("LAOS task failed");
+  constructor(code, detail) {
+    super(detail?.message || "LAOS task failed");
     this.name = "LaosMemoryToolError";
     this.code = code;
+    this.detail = detail || null;
   }
 }
 
@@ -55,8 +52,8 @@ export const LAOS_MEMORY_TOOL_DEFINITION = Object.freeze({
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
 });
 
-function fail(code) {
-  throw new LaosMemoryToolError(code);
+function fail(code, detail) {
+  throw new LaosMemoryToolError(code, detail);
 }
 
 function isPlainObject(value) {
@@ -220,14 +217,16 @@ function runFixed(command, args, options) {
   });
 }
 
-function cliErrorCode(stderr) {
-  if (typeof stderr !== "string") return "request_failed";
+function cliErrorDetail(stderr) {
+  if (typeof stderr !== "string" || stderr.length === 0) return null;
   try {
-    const code = JSON.parse(stderr.trim())?.error?.code;
-    return SAFE_CLI_ERROR_CODES.has(code) ? code : "request_failed";
-  } catch {
-    return "request_failed";
-  }
+    const parsed = JSON.parse(stderr.trim());
+    if (parsed?.error) {
+      const code = typeof parsed.error.code === "string" ? parsed.error.code : "request_failed";
+      return { code, message: parsed.error.message || "LAOS task failed", stage: parsed.error.stage };
+    }
+  } catch {}
+  return null;
 }
 
 function redact(value, roots) {
@@ -274,7 +273,11 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
       );
       if (result?.timedOut === true) fail("laos_task_timeout");
       if (result?.outputLimitExceeded === true) fail("laos_output_limit_exceeded");
-      if (result?.exitCode !== 0) fail(cliErrorCode(result?.stderr));
+      if (result?.exitCode !== 0) {
+        const detail = cliErrorDetail(result?.stderr);
+        if (detail) fail(detail.code, detail);
+        fail("request_failed");
+      }
       if (typeof result?.stdout !== "string") fail("laos_malformed_response");
 
       let payload;
