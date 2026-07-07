@@ -179,16 +179,15 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
         }
 
         if (laosCheckpointTools && laosCheckpointTools.definitions.some((definition) => definition.name === name)) {
-          const tool = laosCheckpointTools.definitions.find((definition) => definition.name === name);
           const started = Date.now();
           try {
             await assertActiveIdentity();
             const result = await laosCheckpointTools.call(name, args);
             auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
             return textResult(result.text);
-          } catch {
+          } catch (error) {
             auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
-            return failureResult();
+            return laosFailureResult(error);
           }
         }
 

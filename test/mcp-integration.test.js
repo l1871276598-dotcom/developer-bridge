@@ -12,11 +12,15 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 import { REQUIRED_TOOL_NAMES } from "../src/controlled-engineering-tools.js";
+import { STRUCTURED_GIT_TOOL_DEFINITIONS } from "../src/structured-git-tools.js";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
 const execFileAsync = promisify(execFile);
 const OPERATOR_ID = "integration.operator";
-const APPROVED_TOOLS = REQUIRED_TOOL_NAMES;
+const APPROVED_TOOLS = [
+  ...REQUIRED_TOOL_NAMES,
+  ...STRUCTURED_GIT_TOOL_DEFINITIONS.map(({ name }) => name),
+];
 const CAPABILITY_PROFILE = "controlled-engineering-v1";
 
 function client() {
@@ -50,6 +54,8 @@ async function exerciseAllTools(mcpClient) {
   assert.deepEqual(JSON.parse(branches.content[0].text).branches.map(({ branch }) => branch), ["feat/test"]);
   const worktrees = await mcpClient.callTool({ name: "git_worktree_list", arguments: {} });
   assert.deepEqual(JSON.parse(worktrees.content[0].text).worktrees.map(({ branch }) => branch), ["feat/test"]);
+  const mergeState = await mcpClient.callTool({ name: "git_merge_state", arguments: {} });
+  assert.equal(JSON.parse(mergeState.content[0].text).in_merge, false);
 
   const createDirectory = await mcpClient.callTool({
     name: "create_directory",
@@ -104,7 +110,7 @@ async function waitForHealth(port) {
   throw new Error("HTTP server did not become healthy");
 }
 
-test("stdio transport scans and runs all fifty-one approved tools", async (t) => {
+test("stdio transport scans and runs all fifty-four approved tools", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-stdio-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
   await prepareWorkspace(workspace);
@@ -131,7 +137,7 @@ test("stdio transport scans and runs all fifty-one approved tools", async (t) =>
   assert.doesNotMatch(stderr, new RegExp(workspace));
 });
 
-test("HTTP transport scans and runs all fifty-one approved tools without leaking route", async (t) => {
+test("HTTP transport scans and runs all fifty-four approved tools without leaking route", async (t) => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "developer-bridge-http-"));
   await prepareWorkspace(workspace);
   const port = await freePort();

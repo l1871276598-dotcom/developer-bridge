@@ -210,7 +210,34 @@ test("requires an initialized research agent data root", async (t) => {
       operatorIdentity,
       env: env(item),
     }),
-    /not an initialized ResearchAgent data root/u,
+    /LAOS_DATA_ROOT is not an initialized ResearchAgent data root/u,
+  );
+});
+
+test("rejects the memory subdirectory as the LAOS data root", async (t) => {
+  const item = await fixture(t);
+  const memoryDir = path.join(item.dataRoot, "memory");
+  await mkdir(memoryDir);
+
+  await assert.rejects(
+    createBridgeWithSyncTools(item.workspace, () => {}, {
+      operatorIdentity,
+      env: env(item, { LAOS_DATA_ROOT: memoryDir }),
+    }),
+    /LAOS_DATA_ROOT is not an initialized ResearchAgent data root/u,
+  );
+});
+
+test("rejects the LAOS code repository as the data root", async (t) => {
+  const item = await fixture(t);
+  await writeFile(path.join(item.workspace, ".research-agent-root"), "{}\n", "utf8");
+
+  await assert.rejects(
+    createBridgeWithSyncTools(item.workspace, () => {}, {
+      operatorIdentity,
+      env: env(item, { LAOS_DATA_ROOT: item.workspace }),
+    }),
+    /Developer Bridge runtime, LAOS code, data and state directories must be separate/u,
   );
 });
 

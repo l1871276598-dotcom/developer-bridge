@@ -73,16 +73,16 @@ app.use(express.json({ limit: "2mb" }));
 const sessions = new Map();
 
 function createMcpServer() {
+  const serverOptions = {
+    capabilities: { tools: {} },
+    ...(bridge.instructions ? { instructions: bridge.instructions } : {}),
+  };
   const server = new Server(
     {
       name: "developer-bridge",
       version: "1.0.0",
     },
-    {
-      capabilities: {
-        tools: {},
-      },
-    }
+    serverOptions,
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({

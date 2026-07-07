@@ -6,11 +6,11 @@ const MAX_TASK_BYTES = 256 * 1024;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const TIMEOUT_MS = 120_000;
 const ALLOWED_TASK_TYPES = new Set([
-  "handoff.write",
   "memory.create",
   "memory.search",
   "memory.review",
   "context.build",
+  "handoff.write",
   "loop.reflect",
   "loop.suggest-policies",
   "loop.generate-candidate",
