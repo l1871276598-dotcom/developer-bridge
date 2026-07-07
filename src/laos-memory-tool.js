@@ -226,7 +226,18 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
         result?.outputLimitExceeded === true ||
         typeof result?.stdout !== "string"
       ) {
-        throw new Error("LAOS task failed");
+        let detail = "LAOS task failed";
+        if (result?.timedOut) detail = "LAOS task timed out";
+        else if (result?.outputLimitExceeded) detail = "LAOS task output limit exceeded";
+        else if (typeof result?.stderr === "string" && result.stderr.length > 0) {
+          try {
+            const parsed = JSON.parse(result.stderr.trim());
+            if (parsed?.error) {
+              detail = JSON.stringify(parsed.error);
+            }
+          } catch {}
+        }
+        throw new Error(detail);
       }
       let payload;
       try {

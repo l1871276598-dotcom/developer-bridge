@@ -136,9 +136,10 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
             const result = await laosMemoryTool.call(args);
             auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
             return textResult(result.text);
-          } catch {
+          } catch (error) {
             auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
-            return failureResult();
+            const message = error instanceof Error ? error.message : "Tool operation failed";
+            return { content: [{ type: "text", text: message }], isError: true };
           }
         }
 
