@@ -1,5 +1,7 @@
 # Developer Bridge 受控分支与 Worktree 工具设计
 
+> **Historical:** The 3000/3001 dual-bridge and ngrok transport were retired on 2026-08-06. Current transport is OpenAI Secure MCP Tunnel → single Developer Bridge on port 3000 → the authorized workspace. Do not recreate the dual-bridge transport from this document.
+
 ## 目标
 
 在现有 Developer Bridge 的单仓库安全边界内增加创建、切换和查看 Git 分支及 worktree 的能力，并生成一份新的 macOS 双击启动文件。现有桌面启动文件保持不变。

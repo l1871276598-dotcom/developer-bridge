@@ -6,7 +6,7 @@ Developer Bridge connects ChatGPT to one explicitly authorized local Git project
 
 ```text
 ChatGPT Web/App
-→ HTTPS tunnel
+→ OpenAI Secure MCP Tunnel
 → Streamable HTTP MCP
 → authorized local workspace / selected managed worktree
 → optional allowlisted LAOS CLI task
@@ -35,7 +35,7 @@ export MCP_PATH="mcp-..."
 
 The workspace must be the real top-level directory of a repository on an attached branch other than `main` or `master`. `DEVELOPER_BRIDGE_WORKSPACE` should be restricted to a single project. Do not commit the secret local path or other secrets. `MCP_PATH` is a single private path segment, not a complete URL, and must not be hard-coded in the repository.
 
-For a LAOS dual-channel instance, authorize the LAOS code repository as the Git workspace and configure both external roots before startup:
+For a LAOS memory-channel instance, authorize the LAOS code repository as the Git workspace and configure both external roots before startup:
 
 ```bash
 export DEVELOPER_BRIDGE_WORKSPACE="/absolute/path/to/laos-code-repository"
@@ -63,19 +63,15 @@ In terminal 1, start the Streamable HTTP MCP service:
 npm start
 ```
 
-In terminal 2, expose port 3000 through the HTTPS tunnel:
+In terminal 2, expose port 3000 through the OpenAI Secure MCP Tunnel using a tunnel profile whose MCP server URL is `http://127.0.0.1:3000/<MCP_PATH>`:
 
 ```bash
-ngrok http 3000
+tunnel-client run --profile <profile-name>
 ```
 
-Configure ChatGPT with this placeholder connection format:
+Configure ChatGPT to connect through that tunnel profile.
 
-```text
-https://<ngrok-domain>/<MCP_PATH>
-```
-
-Do not hard-code an ngrok address. Stop the service and tunnel when they are no longer in use.
+Do not hard-code a tunnel address. Stop the service and tunnel when they are no longer in use.
 
 For a local MCP client that uses stdio instead of HTTP, run:
 
@@ -105,7 +101,7 @@ Explicit Git and GitHub publishing tools:
 - `github_pr_create_draft`: create a GitHub Draft PR using fixed `gh pr create --draft --fill` arguments only. The current branch must be clean, track `origin/<same-branch>`, and exactly match its pushed remote-tracking commit.
 - `github_pr_merge_squash_if_green`: inspect the current branch PR and squash-merge it only when the worktree is clean, the branch is fully pushed, the PR head exactly matches local `HEAD`, at least one CI check exists, every reported check succeeds, and GitHub reports a clean merge state. A green Draft PR is marked Ready and fully rechecked before merging.
 
-LAOS dual-channel tool:
+LAOS memory tool:
 
 - `laos_memory_task`: run one allowlisted LAOS JSON task through the fixed `src/laos.py` entrypoint while Git operations remain bound to the authorized repository. The task cannot choose filesystem paths, commands, executables, or environment variables. Returned code, data, and state paths are redacted.
 
