@@ -65,33 +65,58 @@ export async function resolveVaultRoot(input) {
 }
 
 /**
- * Resolve a note-relative path against a canonical vault root and prove the
- * result stays inside the root with no symlink traversal.
- * Returns { absolute }.
+ * Normalize and validate a vault-relative path (GP-03). This is the SINGLE
+ * locator validation used by the vault adapter and evidence snapshot. It
+ * rejects traversal intent outright — `foo/../bar.md` is never normalized and
+ * accepted, it fails. Also rejects:
+ *   - absolute paths, drive/URL schemes
+ *   - NUL, backslash (Windows separator ambiguity)
+ *   - "." and ".." segments
+ *   - empty segments where unsafe
+ *   - empty or whitespace-only paths
+ * Returns a canonical relative path (no leading/trailing slashes, no "." or
+ * ".." segments, forward-slash separated).
  */
-export async function resolveNotePath(root, notePath) {
+export function normalizeVaultRelativePath(notePath) {
   if (
     typeof notePath !== "string" ||
     notePath.length === 0 ||
     notePath.includes("\0") ||
+    notePath.includes("\\") ||
     path.isAbsolute(notePath) ||
     /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(notePath)
   ) {
     fail("invalid_note_path", "note path must be a non-empty relative path");
   }
-  const normalized = path.normalize(notePath);
-  if (normalized === ".." || normalized.startsWith(`..${path.sep}`)) {
-    fail("note_path_escape", "note path escapes the vault root");
+  const segments = notePath.split("/");
+  const cleaned = [];
+  for (const segment of segments) {
+    if (segment === "." || segment === "..") {
+      fail("note_path_escape", "note path must not contain traversal segments");
+    }
+    if (segment === "") {
+      fail("invalid_note_path", "note path must not contain empty segments");
+    }
+    cleaned.push(segment);
   }
-  const absolute = path.resolve(root, normalized);
+  return cleaned.join("/");
+}
+
+/**
+ * Resolve a note-relative path against a canonical vault root and prove the
+ * result stays inside the root with no symlink traversal.
+ * Returns { absolute, relative }.
+ */
+export async function resolveNotePath(root, notePath) {
+  const relative = normalizeVaultRelativePath(notePath);
+  const absolute = path.resolve(root, relative);
   if (absolute !== root && !absolute.startsWith(`${root}${path.sep}`)) {
     fail("note_path_escape", "note path escapes the vault root");
   }
 
   // Walk each component and reject symlinks along the way.
   let current = root;
-  for (const part of normalized.split(path.sep)) {
-    if (part === "." || part === "") continue;
+  for (const part of relative.split("/")) {
     current = path.join(current, part);
     const info = await lstatOrNull(current);
     if (info === null) {
@@ -105,5 +130,5 @@ export async function resolveNotePath(root, notePath) {
   if (!fileStat.isFile()) {
     fail("note_not_file", "note path must identify a regular file");
   }
-  return { absolute };
+  return { absolute, relative };
 }
