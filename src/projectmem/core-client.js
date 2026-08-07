@@ -18,6 +18,47 @@ export class CoreClientError extends Error {
   }
 }
 
+// The ONLY accepted handle grammar. Core memory ids are type-day-uuid8 slugs
+// (e.g. principle-2026-08-07-3f2a1b9c), so a valid id MUST contain at least
+// one "-". A bare slug like "unknown" or "memory:unknown" is never a valid Core
+// id and fails closed, as do whitespace, control characters, path separators,
+// and extra schema fields.
+const MEMORY_ID_RE = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/u;
+
+/**
+ * Parse a Core memory.search result into a validated memory:<id> handle.
+ * Accepts only a "memory:" string whose id is a non-empty [A-Za-z0-9_-] slug,
+ * or an object with exactly one own "id" string property matching the slug.
+ * Everything else throws core_malformed_response (S12 / R14).
+ */
+export function parseMemoryHandle(item) {
+  if (typeof item === "string") {
+    if (!item.startsWith("memory:")) {
+      throw new CoreClientError("core_malformed_response", "memory.search returned an unrecognized handle string");
+    }
+    const id = item.slice("memory:".length);
+    if (!MEMORY_ID_RE.test(id)) {
+      throw new CoreClientError("core_malformed_response", "memory.search returned a malformed memory handle id");
+    }
+    return item;
+  }
+  if (item && typeof item === "object") {
+    // Exact schema: the object must have exactly one own "id" string property.
+    const ownKeys = Object.keys(item);
+    if (ownKeys.length !== 1 || ownKeys[0] !== "id") {
+      throw new CoreClientError("core_malformed_response", "memory.search returned an unrecognized handle object");
+    }
+    if (!Object.prototype.hasOwnProperty.call(item, "id") || typeof item.id !== "string") {
+      throw new CoreClientError("core_malformed_response", "memory.search returned a malformed handle id");
+    }
+    if (!MEMORY_ID_RE.test(item.id)) {
+      throw new CoreClientError("core_malformed_response", "memory.search returned a malformed handle id");
+    }
+    return `memory:${item.id}`;
+  }
+  throw new CoreClientError("core_malformed_response", "memory.search returned an unrecognized handle");
+}
+
 function findCodeRoot() {
   const workspace = process.env.DEVELOPER_BRIDGE_WORKSPACE;
   if (!workspace) throw new CoreClientError("core_unavailable", "DEVELOPER_BRIDGE_WORKSPACE is not set");
@@ -129,27 +170,11 @@ export function buildCoreClient({ manifest, trustedProfile, env, runner } = {}) 
     if (!Array.isArray(results)) {
       throw new CoreClientError("core_malformed_response", "memory.search results must be an array");
     }
-    // Fail closed on unknown/malformed handle shapes (S12 / plan §49). A
-    // handle is either a memory:<id> string with a non-empty id, or an object
-    // with a non-empty id. Anything else — empty string, wrong type, unknown
-    // shape — fails the entire refresh; nothing is ever wrapped as a fake
-    // "memory:unknown" or "memory:" namespace.
-    return results.map((item) => {
-      if (typeof item === "string") {
-        if (!item.startsWith("memory:")) {
-          throw new CoreClientError("core_malformed_response", "memory.search returned an unrecognized handle string");
-        }
-        const id = item.slice("memory:".length);
-        if (!id || id.length === 0) {
-          throw new CoreClientError("core_malformed_response", "memory.search returned an empty memory handle");
-        }
-        return item;
-      }
-      if (item && typeof item === "object" && typeof item.id === "string" && item.id.length > 0) {
-        return `memory:${item.id}`;
-      }
-      throw new CoreClientError("core_malformed_response", "memory.search returned an unrecognized handle");
-    });
+    // Fail closed on unknown/malformed handle shapes (S12 / R14). The ONLY
+    // accepted handle is a memory:<id> string where <id> is a non-empty
+    // [A-Za-z0-9_-] slug (Core ids are type-day-uuid8). Nothing is ever
+    // wrapped as a fake "memory:unknown", "memory:", or any other namespace.
+    return results.map(parseMemoryHandle);
   }
 
   return { contextSha256, searchHandles };
