@@ -42,7 +42,7 @@ test("F-07: searchHandles never fabricates memory:unknown", async () => {
   const client = buildCoreClient({
     manifest: MANIFEST,
     trustedProfile: PROFILE,
-    runner: runnerReturning({ output: { results: [{ id: "abc" }, "def", { id: "ghi" }] } }),
+    runner: runnerReturning({ output: { results: [{ id: "abc" }, "memory:def", { id: "ghi" }] } }),
   });
   const handles = await client.searchHandles();
   assert.deepEqual(handles, ["memory:abc", "memory:def", "memory:ghi"]);
@@ -56,6 +56,51 @@ test("F-07: searchHandles rejects a malformed Core response (not an array)", asy
     runner: runnerReturning({ output: { results: "not-an-array" } }),
   });
   await assert.rejects(() => client.searchHandles(), (e) => e instanceof CoreClientError);
+});
+
+test("S12: searchHandles fails closed on a bare string handle (no memory: prefix)", async () => {
+  const client = buildCoreClient({
+    manifest: MANIFEST,
+    trustedProfile: PROFILE,
+    runner: runnerReturning({ output: { results: ["def"] } }),
+  });
+  await assert.rejects(() => client.searchHandles(), (e) => e.code === "core_malformed_response");
+});
+
+test("S12: searchHandles fails closed on an empty memory: handle", async () => {
+  const client = buildCoreClient({
+    manifest: MANIFEST,
+    trustedProfile: PROFILE,
+    runner: runnerReturning({ output: { results: ["memory:"] } }),
+  });
+  await assert.rejects(() => client.searchHandles(), (e) => e.code === "core_malformed_response");
+});
+
+test("S12: searchHandles fails closed on a non-memory string handle", async () => {
+  const client = buildCoreClient({
+    manifest: MANIFEST,
+    trustedProfile: PROFILE,
+    runner: runnerReturning({ output: { results: ["file:/etc/passwd"] } }),
+  });
+  await assert.rejects(() => client.searchHandles(), (e) => e.code === "core_malformed_response");
+});
+
+test("S12: searchHandles fails closed on a number handle", async () => {
+  const client = buildCoreClient({
+    manifest: MANIFEST,
+    trustedProfile: PROFILE,
+    runner: runnerReturning({ output: { results: [42] } }),
+  });
+  await assert.rejects(() => client.searchHandles(), (e) => e.code === "core_malformed_response");
+});
+
+test("S12: searchHandles fails closed on an object with empty id", async () => {
+  const client = buildCoreClient({
+    manifest: MANIFEST,
+    trustedProfile: PROFILE,
+    runner: runnerReturning({ output: { results: [{ id: "" }] } }),
+  });
+  await assert.rejects(() => client.searchHandles(), (e) => e.code === "core_malformed_response");
 });
 
 test("F-07: searchHandles rejects a Core error response", async () => {

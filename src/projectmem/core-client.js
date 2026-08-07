@@ -129,11 +129,21 @@ export function buildCoreClient({ manifest, trustedProfile, env, runner } = {}) 
     if (!Array.isArray(results)) {
       throw new CoreClientError("core_malformed_response", "memory.search results must be an array");
     }
-    // Fail closed on unknown handle shapes: an unrecognized object is never
-    // wrapped as a fake "memory:unknown" namespace (F-07 / plan §49).
+    // Fail closed on unknown/malformed handle shapes (S12 / plan §49). A
+    // handle is either a memory:<id> string with a non-empty id, or an object
+    // with a non-empty id. Anything else — empty string, wrong type, unknown
+    // shape — fails the entire refresh; nothing is ever wrapped as a fake
+    // "memory:unknown" or "memory:" namespace.
     return results.map((item) => {
       if (typeof item === "string") {
-        return item.startsWith("memory:") ? item : `memory:${item}`;
+        if (!item.startsWith("memory:")) {
+          throw new CoreClientError("core_malformed_response", "memory.search returned an unrecognized handle string");
+        }
+        const id = item.slice("memory:".length);
+        if (!id || id.length === 0) {
+          throw new CoreClientError("core_malformed_response", "memory.search returned an empty memory handle");
+        }
+        return item;
       }
       if (item && typeof item === "object" && typeof item.id === "string" && item.id.length > 0) {
         return `memory:${item.id}`;
