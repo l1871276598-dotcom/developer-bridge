@@ -1,0 +1,96 @@
+#!/usr/bin/env node
+/**
+ * vault-evidence — publish one Vault note as a verified evidence artifact.
+ *
+ *   vault-evidence publish --note <relative-path> [--config <json>]
+ *
+ * The note path is relative to the configured vault root.  Scope comes from
+ * the partition map + Bridge profile (env LAOS_CHECKPOINT_*).  evidence.publish
+ * is invoked through the same LAOS CLI path as laos_memory_task.
+ */
+
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function usage() {
+  return `usage: vault-evidence publish --note <relative-path> [--config <json>] [--workspace-root <dir>]`;
+}
+
+function parseArgs(argv) {
+  const out = { command: null, note: null, config: null, workspaceRoot: null };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "publish") out.command = "publish";
+    else if (arg === "--note") out.note = argv[++i];
+    else if (arg === "--config") out.config = argv[++i];
+    else if (arg === "--workspace-root") out.workspaceRoot = argv[++i];
+    else if (arg === "--help" || arg === "-h") return { help: true };
+    else {
+      process.stderr.write(`unknown argument: ${arg}\n`);
+      return { error: true };
+    }
+  }
+  return out;
+}
+
+function profileFromEnv(env) {
+  const confidentiality = env.LAOS_CHECKPOINT_CONFIDENTIALITY
+    ?? (env.LAOS_CHECKPOINT_WORKSPACE === "work" ? "internal" : "personal");
+  return {
+    workspace: env.LAOS_CHECKPOINT_WORKSPACE,
+    project: env.LAOS_CHECKPOINT_PROJECT,
+    confidentiality_ceiling: confidentiality,
+  };
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.help) {
+    process.stdout.write(`${usage()}\n`);
+    return 0;
+  }
+  if (args.error) {
+    process.stderr.write(`${usage()}\n`);
+    return 2;
+  }
+  if (args.command !== "publish" || !args.note) {
+    process.stderr.write(`${usage()}\n`);
+    return 2;
+  }
+
+  const { publishNote, errorCode, errorMessage } = await import("../src/vault/vault-evidence.js");
+  const { buildLaosEvidencePublisher } = await import("../src/vault/laos-publisher.js");
+  const { loadConfig } = await import("../src/vault/vault-evidence.js");
+
+  const configPath = args.config ?? process.env.VAULT_EVIDENCE_CONFIG;
+  if (!configPath) {
+    process.stderr.write("missing config: pass --config or set VAULT_EVIDENCE_CONFIG\n");
+    return 2;
+  }
+  const config = await loadConfig(configPath);
+  const profile = profileFromEnv(process.env);
+  if (!profile.workspace || !profile.project) {
+    process.stderr.write("Bridge profile incomplete: set LAOS_CHECKPOINT_WORKSPACE and LAOS_CHECKPOINT_PROJECT\n");
+    return 2;
+  }
+  const publishEvidence = buildLaosEvidencePublisher({ env: process.env });
+
+  try {
+    const result = await publishNote({
+      config,
+      profile,
+      noteRelativePath: args.note,
+      workspaceRoot: args.workspaceRoot ?? config.workspace_root ?? null,
+      publishEvidence,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return 0;
+  } catch (error) {
+    process.stderr.write(`${JSON.stringify({ error: { code: errorCode(error), message: errorMessage(error) } })}\n`);
+    return 1;
+  }
+}
+
+main().then((code) => process.exit(code));

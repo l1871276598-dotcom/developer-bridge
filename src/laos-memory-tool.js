@@ -1,16 +1,18 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lstat, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 const MAX_TASK_BYTES = 256 * 1024;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const TIMEOUT_MS = 120_000;
-const ALLOWED_TASK_TYPES = new Set([
+
+export const FROZEN_LAOS_TASKS = Object.freeze([
   "memory.create",
   "memory.search",
-  "memory.review",
   "context.build",
   "handoff.write",
+  "evidence.publish",
   "loop.reflect",
   "loop.suggest-policies",
   "loop.generate-candidate",
@@ -19,6 +21,24 @@ const ALLOWED_TASK_TYPES = new Set([
   "reflection.apply",
   "reflection.record",
 ]);
+
+export const ALLOWED_LAOS_TASKS = Object.freeze(new Set(FROZEN_LAOS_TASKS));
+
+// LAOS Canonical JSON v1 (docs/adr/evidence-hash-semantics-v1.md). Export the
+// canonicalizer so the golden-vector test can pin fixed cross-language digests.
+export function canonicalJson(value) {
+  let normalized;
+  try {
+    normalized = sortedValue(value);
+  } catch (error) {
+    if (error instanceof LaosMemoryToolError) throw error;
+    fail("invalid_request");
+  }
+  return JSON.stringify(normalized, (key, item) => {
+    if (typeof item === "number" && !Number.isFinite(item)) fail("invalid_request");
+    return item;
+  });
+}
 
 export class LaosMemoryToolError extends Error {
   constructor(code, detail) {
@@ -38,7 +58,7 @@ export const LAOS_MEMORY_TOOL_DEFINITION = Object.freeze({
       task: {
         type: "object",
         properties: {
-          type: { type: "string", enum: [...ALLOWED_TASK_TYPES] },
+          type: { type: "string", enum: [...FROZEN_LAOS_TASKS] },
           workspace: { type: "string", enum: ["personal", "work"] },
           input: { type: "object" },
         },
@@ -131,7 +151,179 @@ function requireSeparatedRoots(runtimeRoot, codeRoot, dataRoot, stateDir) {
   }
 }
 
-function normalizeTask(args) {
+const MAX_EVIDENCE_PAYLOAD_BYTES = 256 * 1024;
+const SHA256_RE = /^[0-9a-f]{64}$/u;
+
+// Core agents read trusted scope from either the top-level task object
+// (via _task_value) or from task.input. This table says which scope fields the
+// Core agent for each task safely consumes from task.input, so the unified gate
+// can re-inject the trusted profile value in the position Core reads. Tasks
+// whose Core agent enforces a strict input schema (loop.reflect et al.) read
+// workspace only from the top-level task object and appear with an empty list.
+const SCOPE_INPUT_TASKS = Object.freeze({
+  "memory.create": ["workspace", "project", "confidentiality"],
+  "memory.search": ["workspace", "project"],
+  "context.build": ["workspace", "project"],
+  "handoff.write": ["workspace"],
+  "evidence.publish": ["workspace", "project", "confidentiality"],
+  "loop.reflect": [],
+  "loop.suggest-policies": [],
+  "loop.generate-candidate": [],
+  "loop.coordinate": ["workspace", "project"],
+  "reflection.prepare": [],
+  "reflection.apply": ["workspace", "project", "confidentiality"],
+  "reflection.record": ["workspace", "project", "confidentiality"],
+});
+
+function trustedScope(env) {
+  const workspace = env.LAOS_CHECKPOINT_WORKSPACE;
+  const project = env.LAOS_CHECKPOINT_PROJECT;
+  let confidentiality = env.LAOS_CHECKPOINT_CONFIDENTIALITY;
+  if (confidentiality === undefined) {
+    confidentiality = workspace === "work" ? "internal" : "personal";
+  }
+  if (workspace !== "personal" && workspace !== "work") fail("invalid_request");
+  if (typeof project !== "string" || project.length === 0) fail("invalid_request");
+  if (!["public", "personal", "internal", "restricted"].includes(confidentiality)) fail("invalid_request");
+  return { workspace, project, confidentiality };
+}
+
+// One unified profile scope gate for every allowlisted task (C-INV-13).
+// Scope is owned by the Bridge profile, never by the caller:
+//   1. a caller top-level workspace that disagrees with the profile is rejected;
+//   2. any caller-supplied workspace/project/confidentiality in input that
+//      disagrees with the profile is rejected (scope_mismatch);
+//   3. all caller scope is stripped from input;
+//   4. the trusted profile scope is injected in the exact positions Core reads.
+function normalizeScopedTask(task, env) {
+  const scope = trustedScope(env);
+
+  if (task.workspace !== undefined && task.workspace !== scope.workspace) {
+    fail("scope_mismatch");
+  }
+
+  const input = task.input;
+  const normalizedInput = { ...input };
+  for (const name of ["workspace", "project", "confidentiality"]) {
+    if (name in input && input[name] !== scope[name]) fail("scope_mismatch");
+    delete normalizedInput[name];
+  }
+
+  const normalized = { ...task, workspace: scope.workspace };
+  for (const name of SCOPE_INPUT_TASKS[task.type]) {
+    normalizedInput[name] = scope[name];
+  }
+  return { ...normalized, input: normalizedInput };
+}
+
+function sortedValue(value) {
+  if (Array.isArray(value)) return value.map(sortedValue);
+  if (isPlainObject(value)) {
+    const sorted = {};
+    for (const key of Object.keys(value).sort()) sorted[key] = sortedValue(value[key]);
+    return sorted;
+  }
+  return value;
+}
+
+function sha256Hex(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function normalizeEvidenceTask(task, env) {
+  const input = task.input;
+  if (!isPlainObject(input)) fail("invalid_request");
+  const schemaVersion = input.schema_version;
+  if (schemaVersion !== 2) fail("invalid_request");
+  const kind = input.kind;
+  if (kind !== "vault_note_snapshot") fail("invalid_request");
+  const source = input.source;
+  if (!isPlainObject(source)) fail("invalid_source_identity");
+  const scheme = source.scheme;
+  const noteId = source.note_id;
+  const suppliedSourceSha = source.source_sha256;
+  if (scheme !== "vault-note") fail("invalid_source_identity");
+  if (typeof noteId !== "string" || noteId.length === 0 || noteId.length > 512) fail("invalid_source_identity");
+  if (noteId.includes("/") || noteId.includes("\\") || noteId.includes("\0")) fail("invalid_source_identity");
+  if (typeof suppliedSourceSha !== "string" || !SHA256_RE.test(suppliedSourceSha)) fail("invalid_source_identity");
+
+  const locator = input.locator;
+  if (!isPlainObject(locator) || Object.keys(locator).some((key) => key !== "relative_path")) fail("invalid_request");
+  const relativePath = locator.relative_path;
+  if (typeof relativePath !== "string" || relativePath.length === 0 || relativePath.length > 4096 || relativePath.startsWith("/")) {
+    fail("invalid_source_identity");
+  }
+  const payload = input.payload;
+  if (!isPlainObject(payload)) fail("invalid_request");
+
+  // Scope is owned by the Bridge profile, never by the caller. Reject any
+  // caller-supplied scope that disagrees with the profile before touching
+  // payload content, so scope attacks always surface as scope_mismatch.
+  const workspace = env.LAOS_CHECKPOINT_WORKSPACE;
+  const project = env.LAOS_CHECKPOINT_PROJECT;
+  let confidentiality = env.LAOS_CHECKPOINT_CONFIDENTIALITY;
+  if (confidentiality === undefined) {
+    confidentiality = workspace === "work" ? "internal" : "personal";
+  }
+  if (workspace !== "personal" && workspace !== "work") fail("invalid_request");
+  if (typeof project !== "string" || project.length === 0) fail("invalid_request");
+  if (!["public", "personal", "internal", "restricted"].includes(confidentiality)) fail("invalid_request");
+
+  const canonical = canonicalJson(payload);
+  const payloadBytes = Buffer.byteLength(canonical, "utf8");
+  if (payloadBytes > MAX_EVIDENCE_PAYLOAD_BYTES) fail("payload_too_large");
+
+  // Evidence Hash Semantics v1 (docs/adr/evidence-hash-semantics-v1.md):
+  //   - payload_sha256 = SHA256(LAOSCanonicalJSON(payload)), recomputed here;
+  //   - source_sha256 must match SHA256(payload.content) — Core re-verifies
+  //     this, and so does the Bridge (defense-in-depth, C-INV-15).
+  const computedPayloadSha = sha256Hex(canonical);
+  const suppliedPayloadSha = input.payload_sha256;
+  if (typeof suppliedPayloadSha !== "string" || !SHA256_RE.test(suppliedPayloadSha)) fail("invalid_request");
+  if (computedPayloadSha !== suppliedPayloadSha.toLowerCase()) fail("source_hash_mismatch");
+
+  if (typeof payload.content !== "string") fail("invalid_request");
+  const computedSourceSha = sha256Hex(Buffer.from(payload.content, "utf8"));
+  if (computedSourceSha !== suppliedSourceSha.toLowerCase()) fail("source_hash_mismatch");
+
+  // canonical identity is DERIVED, never taken from the caller. Core derives
+  // and returns it too (C-INV-14); the Bridge validates the round-trip at the
+  // dispatcher boundary but does NOT forward a caller-supplied identity.
+  const canonicalIdentity = `vault-note:${noteId}@${computedSourceSha}`;
+
+  return {
+    ...task,
+    input: {
+      ...input,
+      workspace,
+      project,
+      confidentiality,
+      payload_sha256: computedPayloadSha,
+      source: {
+        ...source,
+        source_sha256: computedSourceSha,
+      },
+    },
+    // Internal expectation for the dispatcher to compare against Core's
+    // returned canonical_identity. Stripped before Core sees it.
+    _expected_canonical_identity: canonicalIdentity,
+  };
+}
+
+// Evidence Hash Semantics v1 helper: normalize a caller-supplied
+// evidence.publish input through the SAME profile scope gate and evidence
+// normalizer the Bridge dispatcher uses. Exported so the vault-evidence CLI
+// cannot bypass the Bridge policy boundary (C-INV-16) — every production
+// evidence ingress goes through this single normalization path.
+export function normalizeEvidenceIngress(task, env) {
+  const scoped = normalizeScopedTask(task, env);
+  const normalized = normalizeEvidenceTask(scoped, env);
+  const expectedIdentity = normalized._expected_canonical_identity;
+  delete normalized._expected_canonical_identity;
+  return { task: normalized, expectedIdentity };
+}
+
+function normalizeTask(args, env) {
   if (!isPlainObject(args) || Object.keys(args).some((key) => key !== "task")) {
     fail("invalid_laos_task");
   }
@@ -141,14 +333,27 @@ function normalizeTask(args) {
   if (keys.some((key) => !["type", "workspace", "input"].includes(key))) {
     fail("invalid_laos_task");
   }
-  if (!ALLOWED_TASK_TYPES.has(task.type)) fail("invalid_laos_task");
+  if (!ALLOWED_LAOS_TASKS.has(task.type)) fail("operation_not_allowed");
   if (task.workspace !== undefined && !["personal", "work"].includes(task.workspace)) {
     fail("invalid_laos_task");
   }
   if (!isPlainObject(task.input)) fail("invalid_laos_task");
-  const encoded = JSON.stringify(task);
+  let normalized = task;
+  let expectedIdentity = null;
+  if (task.type === "evidence.publish") {
+    // evidence.publish carries scope inside task.input, which Core's
+    // EvidenceAgent reads. The unified gate below normalizes top-level scope;
+    // the evidence normalizer additionally injects trusted scope into input.
+    normalized = normalizeScopedTask(task, env);
+    normalized = normalizeEvidenceTask(normalized, env);
+    expectedIdentity = normalized._expected_canonical_identity;
+    delete normalized._expected_canonical_identity;
+  } else {
+    normalized = normalizeScopedTask(task, env);
+  }
+  const encoded = JSON.stringify(normalized);
   if (Buffer.byteLength(encoded, "utf8") > MAX_TASK_BYTES) fail("invalid_laos_task");
-  return encoded;
+  return { encoded, expectedIdentity };
 }
 
 function safeEnvironment(env) {
@@ -262,7 +467,7 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
   return Object.freeze({
     definition: LAOS_MEMORY_TOOL_DEFINITION,
     async call(args) {
-      const taskJson = normalizeTask(args);
+      const { encoded: taskJson, expectedIdentity } = normalizeTask(args, env);
       const codeRoot = await canonicalDirectory(getCodeRoot(), "Authorized workspace");
       requireSeparatedRoots(runtimeRoot, codeRoot, dataRoot, stateDir);
       const cli = await resolveCli(codeRoot);
@@ -285,6 +490,17 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
         payload = JSON.parse(result.stdout.trim());
       } catch {
         fail("laos_malformed_response");
+      }
+      if (expectedIdentity !== null) {
+        // C-INV-14: Core must derive the same canonical identity the Bridge
+        // derived from the same bytes. A mismatch means the source binding
+        // round-trip is broken — fail closed. The Core CLI reports the agent
+        // result under `output`.
+        const returnedIdentity = payload?.output?.canonical_identity
+          ?? payload?.result?.canonical_identity;
+        if (returnedIdentity !== expectedIdentity) {
+          fail("identity_mismatch");
+        }
       }
       return {
         text: JSON.stringify(redact(payload, [

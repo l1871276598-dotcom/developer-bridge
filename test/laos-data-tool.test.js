@@ -40,6 +40,11 @@ function env(fixture, overrides = {}) {
     DEVELOPER_BRIDGE_CAPABILITY_PROFILE: "controlled-engineering-v1",
     LAOS_DATA_ROOT: fixture.dataRoot,
     LAOS_STATE_DIR: fixture.stateDir,
+    // Trusted Bridge profile scope (C-INV-13). LAOS tasks are fail-closed
+    // without it, so tests that reach Core must pin the profile.
+    LAOS_CHECKPOINT_WORKSPACE: "personal",
+    LAOS_CHECKPOINT_PROJECT: "laos",
+    LAOS_CHECKPOINT_CONFIDENTIALITY: "personal",
     ...overrides,
   };
 }
@@ -62,7 +67,7 @@ test("conditionally exposes one LAOS memory task bound to external data and stat
   });
 
   assert.equal(bridge.tools.at(-1).name, "laos_memory_task");
-  assert.equal(bridge.tools.length, 55);
+  assert.equal(bridge.tools.length, 56);
 
   const task = {
     type: "memory.create",
@@ -92,7 +97,15 @@ test("conditionally exposes one LAOS memory task bound to external data and stat
     item.stateDir,
   ]);
   assert.equal(calls[0].args[5], "--task-json");
-  assert.deepEqual(JSON.parse(calls[0].args[6]), task);
+  // The unified scope gate forwards a normalized task whose scope is rebuilt
+  // from the trusted Bridge profile (C-INV-13), not a verbatim caller copy.
+  const forwarded = JSON.parse(calls[0].args[6]);
+  assert.equal(forwarded.type, "memory.create");
+  assert.equal(forwarded.workspace, "personal");
+  assert.equal(forwarded.input.workspace, "personal");
+  assert.equal(forwarded.input.project, "laos");
+  assert.equal(forwarded.input.confidentiality, "personal");
+  assert.equal(forwarded.input.content, "使用尽可能少的代码实现相同功能。");
 });
 
 test("allows handoff.write LAOS tasks through the fixed CLI", async (t) => {
@@ -130,7 +143,12 @@ test("allows handoff.write LAOS tasks through the fixed CLI", async (t) => {
   assert.equal(calls.length, 1);
   const taskJsonIndex = calls[0].args.indexOf("--task-json") + 1;
   assert.notEqual(taskJsonIndex, 0);
-  assert.deepEqual(JSON.parse(calls[0].args[taskJsonIndex]), task);
+  const forwarded = JSON.parse(calls[0].args[taskJsonIndex]);
+  assert.equal(forwarded.type, "handoff.write");
+  assert.equal(forwarded.workspace, "personal");
+  assert.equal(forwarded.input.project_slug, "skill-optimization");
+  assert.equal(forwarded.input.content, "# Handoff\n");
+  assert.equal(forwarded.input.workspace, "personal");
 
   const rejected = await bridge.callTool("laos_memory_task", {
     task: { type: "handoff.read", workspace: "personal", input: {} },
@@ -179,7 +197,11 @@ print(json.dumps({"ok": True, "task_type": task["type"], "data_root": args.root,
     data_root: "[laos-data]",
     state_dir: "[laos-state]",
   });
-  assert.deepEqual(JSON.parse(await readFile(path.join(item.dataRoot, "smoke-task.json"), "utf8")), task);
+  assert.deepEqual(JSON.parse(await readFile(path.join(item.dataRoot, "smoke-task.json"), "utf8")), {
+    type: "memory.search",
+    workspace: "personal",
+    input: { query: "bridge smoke", workspace: "personal", project: "laos" },
+  });
   assert.equal(await readFile(path.join(item.stateDir, "smoke-state.txt"), "utf8"), "ok\n");
 });
 
@@ -190,7 +212,10 @@ test("does not advertise the LAOS task without both roots and rejects partial co
     env: { DEVELOPER_BRIDGE_CAPABILITY_PROFILE: "controlled-engineering-v1" },
   });
   assert.equal(bridge.tools.some(({ name }) => name === "laos_memory_task"), false);
-  assert.equal(bridge.tools.length, 54);
+  // laos_bridge_info is always present (read-only diagnostics), even without
+  // LAOS data/state roots.
+  assert.equal(bridge.tools.some(({ name }) => name === "laos_bridge_info"), true);
+  assert.equal(bridge.tools.length, 55);
 
   await assert.rejects(
     createBridgeWithSyncTools(item.workspace, () => {}, {

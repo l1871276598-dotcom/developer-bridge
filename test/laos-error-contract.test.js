@@ -40,6 +40,11 @@ function env(item) {
     DEVELOPER_BRIDGE_CAPABILITY_PROFILE: "controlled-engineering-v1",
     LAOS_DATA_ROOT: item.dataRoot,
     LAOS_STATE_DIR: item.stateDir,
+    // Trusted Bridge profile scope (C-INV-13). LAOS tasks are fail-closed
+    // without it, so tests that reach Core must pin the profile.
+    LAOS_CHECKPOINT_WORKSPACE: "personal",
+    LAOS_CHECKPOINT_PROJECT: "laos",
+    LAOS_CHECKPOINT_CONFIDENTIALITY: "personal",
   };
 }
 
