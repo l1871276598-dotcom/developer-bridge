@@ -48,14 +48,19 @@ export async function buildBridgeInfo({ bridgeRoot, codeRoot, env, allowlist = F
   const coreCommit = await gitAt(codeRoot, "rev-parse", "HEAD");
 
   // Runtime allowlist canonical digest — a red team compares this against the
-  // reviewed allowlist (plan §54).
-  const allowlistSha = sha256Hex(canonicalJson({ tasks: [...allowlist] }));
+  // reviewed allowlist (plan §54). The allowlist CONTENTS are included so an
+  // auditor can recompute the digest independently (S13): sort the task names,
+  // canonical-JSON serialize {tasks:[...]}, SHA-256.
+  const allowlistArray = [...allowlist].sort();
+  const allowlistSha = sha256Hex(canonicalJson({ tasks: allowlistArray }));
 
   return {
+    schema_version: 1,
     bridge: {
       git_commit: commit ?? "unavailable",
       git_tree: tree ?? "unavailable",
       dirty: dirty !== null && dirty.length > 0,
+      allowlist: allowlistArray,
       allowlist_sha256: allowlistSha,
       protocol_version: "laos-task-v2",
     },

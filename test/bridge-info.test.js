@@ -45,6 +45,31 @@ test("C-INV-19: laos_bridge_info exposes verifiable build identity", async (t) =
   assert.equal(info.governance.constitution_version, "1.0");
 });
 
+test("S13: allowlist contents are exposed so the digest is independently recomputable", async (t) => {
+  const repoDir = await repo(t);
+  const { createHash } = await import("node:crypto");
+  const { FROZEN_LAOS_TASKS, canonicalJson } = await import("../src/laos-memory-tool.js");
+  const info = await buildBridgeInfo({ bridgeRoot: repoDir, codeRoot: repoDir });
+  // The allowlist array must be present and sorted.
+  assert.ok(Array.isArray(info.bridge.allowlist));
+  assert.deepEqual(info.bridge.allowlist, [...FROZEN_LAOS_TASKS].sort());
+  // An auditor can recompute the digest from the exposed contents alone.
+  const recomputed = createHash("sha256")
+    .update(canonicalJson({ tasks: info.bridge.allowlist }))
+    .digest("hex");
+  assert.equal(recomputed, info.bridge.allowlist_sha256);
+});
+
+test("S13: laos_bridge_info has no side effects on git tree or state", async (t) => {
+  const repoDir = await repo(t);
+  const before = (await git(repoDir, "rev-parse", "HEAD^{tree}")).stdout.trim();
+  const info = await buildBridgeInfo({ bridgeRoot: repoDir, codeRoot: repoDir });
+  // Reading build info must not dirty the tree or change HEAD.
+  assert.equal(info.bridge.dirty, false);
+  const after = (await git(repoDir, "rev-parse", "HEAD^{tree}")).stdout.trim();
+  assert.equal(after, before);
+});
+
 test("C-INV-19: dirty working tree is reported", async (t) => {
   const repoDir = await repo(t);
   await writeFile(path.join(repoDir, "uncommitted.txt"), "x\n");
@@ -79,7 +104,10 @@ test("C-INV-19: calling laos_bridge_info returns the build identity without side
 test("C-INV-19: allowlist digest is stable and recomputable from the frozen allowlist", async (t) => {
   const { createHash } = await import("node:crypto");
   const { FROZEN_LAOS_TASKS, canonicalJson } = await import("../src/laos-memory-tool.js");
-  const expected = createHash("sha256").update(canonicalJson({ tasks: [...FROZEN_LAOS_TASKS] })).digest("hex");
+  // The digest contract sorts task names then canonical-serializes {tasks}.
+  const expected = createHash("sha256")
+    .update(canonicalJson({ tasks: [...FROZEN_LAOS_TASKS].sort() }))
+    .digest("hex");
   const repoDir = await repo(t);
   const info = await buildBridgeInfo({ bridgeRoot: repoDir, codeRoot: repoDir });
   assert.equal(info.bridge.allowlist_sha256, expected);
