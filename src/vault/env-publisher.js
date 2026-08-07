@@ -2,18 +2,21 @@ import { readFile } from "node:fs/promises";
 
 import { buildPartitionMap, resolvePartition } from "./partition-map.js";
 import { buildCanonicalNoteSnapshot } from "./snapshot.js";
-import { readStableVaultNote } from "./stable-read.js";
 import { resolveVaultRoot } from "./vault-root.js";
 import { verifyScope } from "./publisher.js";
 
 /**
- * Environment-configured vault evidence publisher (GP-01).
+ * Environment-configured vault evidence publisher (GP-01 + S8/GP3-01).
  *
  * The ONLY way an external caller can mint a vault-backed evidence artifact:
- * the Bridge reads the Vault (stable single read), derives identity + source
- * hash, resolves the partition, verifies scope against the trusted Bridge
- * profile, and only then publishes through Core evidence.publish (internal).
- * A caller can never construct source identity, payload, or scope.
+ * the Bridge calls Core's `vault.read` task, which performs an fd-rooted
+ * traversal (Python os.open with dir_fd + O_NOFOLLOW on every component), so
+ * the validated directory chain IS the opened directory chain. The note bytes
+ * come back from Core; the Bridge then derives identity + source hash,
+ * resolves the partition, verifies scope against the trusted Bridge profile,
+ * and publishes through Core evidence.publish (internal). A caller can never
+ * construct source identity, payload, or scope, and can never cause a
+ * vault-outside file to be read (the fd-rooted read is atomic in Python).
  */
 
 export async function loadVaultConfig(env) {
@@ -54,13 +57,42 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
 
   // The evidence.publish forwarding uses the default runCli (resolving the CLI
   // under codeRoot and spawning env.LAOS_PYTHON_EXECUTABLE), the same fixed
-  // runner shape as laos_memory_task. An injected laosRunCommand is NOT used
-  // here — it is only for the main dispatcher; the vault publisher must run
-  // through the real Core CLI so the artifact is genuinely minted.
+  // runner shape as laos_memory_task.
   const publish = async (evidenceInput) => {
     const { buildLaosEvidencePublisher } = await import("./laos-publisher.js");
     const publisher = buildLaosEvidencePublisher({ env, codeRoot });
     return publisher(evidenceInput);
+  };
+
+  // Core `vault.read`: fd-rooted traversal in Python closes GP3-01. The same
+  // runner invokes the Core CLI restricted task interface.
+  const vaultRead = async (relativePath) => {
+    const { runCli } = await import("./laos-publisher.js");
+    const task = {
+      type: "vault.read",
+      input: { vault_root: root, relative_path: relativePath },
+    };
+    const stdout = await runCli(env, JSON.stringify(task), codeRoot);
+    let parsed;
+    try {
+      parsed = JSON.parse(stdout);
+    } catch {
+      const error = new Error("vault.read returned malformed JSON");
+      error.code = "vault_read_failed";
+      throw error;
+    }
+    if (parsed?.error) {
+      const error = new Error(parsed.error.message || "vault.read failed");
+      error.code = parsed.error.code || "vault_read_failed";
+      throw error;
+    }
+    const content = parsed?.output?.content;
+    if (typeof content !== "string") {
+      const error = new Error("vault.read did not return content");
+      error.code = "vault_read_failed";
+      throw error;
+    }
+    return content;
   };
 
   return async (input) => {
@@ -72,16 +104,15 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
     }
     const noteRelativePath = input.relative_path;
 
-    // One stable read: identity and payload from the SAME bytes (C-INV-17),
-    // through the single source-byte contract (GP-02). The canonical relative
-    // path returned by the resolver is the ONLY locator used downstream — the
-    // caller's original string never reaches partition/identity/source locator
-    // (GP2-02): the read object, partition, and identity must describe the same
-    // canonical note.
-    const { raw, relative: canonicalRelative } = await readStableVaultNote(root, noteRelativePath);
-    const partition = resolvePartition(map, canonicalRelative);
+    // fd-rooted vault read via Core (S8/GP3-01): the returned bytes are the
+    // note content as read from the fd chain rooted at the trusted vault root.
+    // The relative path Core validated is the same reject-all string, so the
+    // read object, partition, and identity describe the same canonical note
+    // (GP2-02).
+    const raw = await vaultRead(noteRelativePath);
+    const partition = resolvePartition(map, noteRelativePath);
     const confirmed = verifyScope(partition, profile);
-    const { identity, input: snapshotInput } = buildCanonicalNoteSnapshot(raw, canonicalRelative, partition);
+    const { identity, input: snapshotInput } = buildCanonicalNoteSnapshot(raw, noteRelativePath, partition);
 
     const evidenceInput = {
       ...snapshotInput,

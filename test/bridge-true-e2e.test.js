@@ -351,3 +351,45 @@ test("E20b: allowlist does not expose memory.review/memory.activate at runtime",
   assert.equal(enumVals.includes("evidence.publish"), false, "evidence.publish must not be external");
   assert.equal(enumVals.includes("vault.snapshot.publish"), true, "vault.snapshot.publish must be exposed");
 });
+
+// GP3-01 (Round 4): the vault read is fd-rooted in Core (Python dir_fd +
+// O_NOFOLLOW), so a symlink pointing outside the vault must fail — no
+// vault-outside file may enter the snapshot pipeline.
+test("GP3-01: final-component symlink to a vault-outside file fails publish", async (t) => {
+  const setup = await coreSetup(t);
+  const { bridge } = await createTrueBridge(setup);
+  const outside = path.join(setup.base, "outside-secret.txt");
+  await writeFile(outside, "TOP-SECRET-OUTSIDE\n");
+  const { symlink, unlink } = await import("node:fs/promises");
+  // Replace the existing note with a symlink pointing outside the vault.
+  const target = path.join(setup.vault, "01-Projects", "LAOS", "design.md");
+  await unlink(target);
+  await symlink(outside, target);
+  const result = await bridge.callTool("laos_memory_task", {
+    task: snapshotTask("01-Projects/LAOS/design.md"),
+  });
+  assert.equal(result.isError, true, "vault-outside symlink must be rejected");
+  const text = result.content[0].text;
+  assert.equal(text.includes("TOP-SECRET-OUTSIDE"), false, "outside content must never leak");
+});
+
+test("GP3-01: intermediate-directory symlink to a vault-outside dir fails publish", async (t) => {
+  const setup = await coreSetup(t);
+  const { bridge } = await createTrueBridge(setup);
+  const outsideDir = path.join(setup.base, "outside-dir");
+  await mkdir(outsideDir);
+  await writeFile(path.join(outsideDir, "secret.md"), "OUTSIDE-DIR-SECRET\n");
+  const { symlink } = await import("node:fs/promises");
+  // Replace an intermediate directory with a symlink.
+  const laosDir = path.join(setup.vault, "01-Projects", "LAOS");
+  const realDir = path.join(setup.vault, "01-Projects", "real");
+  const { rename } = await import("node:fs/promises");
+  await rename(laosDir, realDir);
+  await symlink(outsideDir, laosDir);
+  const result = await bridge.callTool("laos_memory_task", {
+    task: snapshotTask("01-Projects/LAOS/secret.md"),
+  });
+  assert.equal(result.isError, true, "intermediate symlink must be rejected");
+  const text = result.content[0].text;
+  assert.equal(text.includes("OUTSIDE-DIR-SECRET"), false, "outside dir content must never leak");
+});

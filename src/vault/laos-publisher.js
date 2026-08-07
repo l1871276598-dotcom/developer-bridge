@@ -23,7 +23,9 @@ function findCli(codeRoot) {
   return cli;
 }
 
-function runCli(env, taskJson, codeRoot) {
+// Exported so the env-publisher can invoke the Core CLI for the fd-rooted
+// vault.read task (S8/GP3-01) through the same restricted task interface.
+export function runCli(env, taskJson, codeRoot) {
   return new Promise((resolve, reject) => {
     const cli = findCli(codeRoot);
     const args = [
