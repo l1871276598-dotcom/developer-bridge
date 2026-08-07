@@ -45,7 +45,10 @@ author:
   name: Alice
   email: alice@example.com
 `);
-  assert.deepEqual(obj.author, { name: "Alice", email: "alice@example.com" });
+  // Parser uses Object.create(null) for mappings (F-06 prototype-pollution
+  // defense); assert fields individually.
+  assert.equal(obj.author.name, "Alice");
+  assert.equal(obj.author.email, "alice@example.com");
 });
 
 test("skips comments and blank lines", () => {
@@ -83,4 +86,40 @@ project: LAOS
 
 test("rejects a root-level block sequence (no mapping key)", () => {
   assert.throws(() => parseFrontMatterYaml(`- a\n- b`), { name: "YamlError" });
+});
+
+test("F-06: rejects duplicate mapping keys instead of last-wins", () => {
+  assert.throws(() => parseFrontMatterYaml(`id: A\nid: B\n`), { name: "YamlError" });
+});
+
+test("F-06: rejects duplicate keys inside nested mappings", () => {
+  assert.throws(() => parseFrontMatterYaml(`meta:\n  k: 1\n  k: 2\n`), { name: "YamlError" });
+});
+
+test("F-06: rejects __proto__ as a mapping key (prototype pollution)", () => {
+  assert.throws(() => parseFrontMatterYaml(`__proto__:\n  polluted: true\n`), { name: "YamlError" });
+});
+
+test("F-06: rejects constructor as a mapping key", () => {
+  assert.throws(() => parseFrontMatterYaml(`constructor: evil\n`), { name: "YamlError" });
+});
+
+test("F-06: rejects prototype as a mapping key", () => {
+  assert.throws(() => parseFrontMatterYaml(`prototype: evil\n`), { name: "YamlError" });
+});
+
+test("F-06: rejects YAML merge key (<<)", () => {
+  assert.throws(() => parseFrontMatterYaml(`<<: *anchor\n`), { name: "YamlError" });
+});
+
+test("F-06: rejects anchors and aliases", () => {
+  assert.throws(() => parseFrontMatterYaml(`base: &base\n  k: v\nother: *base\n`), { name: "YamlError" });
+});
+
+test("F-06: rejects custom tags", () => {
+  assert.throws(() => parseFrontMatterYaml(`id: !!binary xyz\n`), { name: "YamlError" });
+});
+
+test("F-06: rejects keys that are not safe plain scalars", () => {
+  assert.throws(() => parseFrontMatterYaml(`[a]: 1\n`), { name: "YamlError" });
 });

@@ -24,11 +24,47 @@ export class YamlError extends Error {
 
 const INDENT_RE = /^( *)/u;
 
+// Keys that are dangerous or ambiguous in a mapping (F-06 / plan §38). Reject
+// them so front matter can never be a prototype-pollution or merge-key vector.
+const UNSAFE_KEYS = new Set(["__proto__", "prototype", "constructor", ""]);
+
+function safeKey(key, context) {
+  if (UNSAFE_KEYS.has(key)) {
+    throw new YamlError(`unsafe mapping key ${JSON.stringify(key)}${context ? ` in ${context}` : ""}`);
+  }
+  if (/^[&*]/.test(key)) {
+    throw new YamlError(`anchor/alias keys are not supported: ${JSON.stringify(key)}`);
+  }
+  if (/^\[.*\]$/.test(key) || /^\{.*\}$/.test(key)) {
+    throw new YamlError(`complex mapping keys are not supported: ${JSON.stringify(key)}`);
+  }
+  return key;
+}
+
+// Reject YAML merge key `<<` at any position of a mapping line.
+function rejectMergeKey(text) {
+  if (text.startsWith("<<") && (text.length === 2 || /^<<[\s:]/.test(text))) {
+    throw new YamlError("YAML merge keys (<<) are not supported");
+  }
+}
+
+// Reject explicit tags (`!!tag`, `!tag`) and anchors/aliases (`&a`, `*a`)
+// in scalar or value position.
+function rejectTag(text) {
+  if (/^!{1,2}[\w.-]+/.test(text)) {
+    throw new YamlError(`YAML tags are not supported: ${JSON.stringify(text)}`);
+  }
+  if (/^&[\w.-]+/.test(text) || /^\*[\w.-]+/.test(text)) {
+    throw new YamlError(`YAML anchors/aliases are not supported: ${JSON.stringify(text)}`);
+  }
+}
+
 function parseScalar(raw) {
   const text = raw.trim();
   if (text === "" || text === "null" || text === "~") return null;
   if (text === "true" || text === "True") return true;
   if (text === "false" || text === "False") return false;
+  rejectTag(text);
   if (
     (text.startsWith('"') && text.endsWith('"') && text.length >= 2) ||
     (text.startsWith("'") && text.endsWith("'") && text.length >= 2)
@@ -57,6 +93,9 @@ function parseScalar(raw) {
       const idx = pair.indexOf(":");
       if (idx < 0) throw new YamlError("invalid flow map entry");
       const key = parseScalar(pair.slice(0, idx)).toString();
+      if (Object.prototype.hasOwnProperty.call(out, key)) {
+        throw new YamlError(`duplicate key in flow map: ${key}`);
+      }
       out[key] = parseScalar(pair.slice(idx + 1));
     }
     return out;
@@ -70,7 +109,7 @@ function parseScalar(raw) {
  */
 export function parseFrontMatterYaml(text) {
   const lines = text.replace(/\r\n/gu, "\n").split("\n");
-  const root = {};
+  const root = Object.create(null);
   const stack = [{ indent: -1, obj: root }];
 
   for (let i = 0; i < lines.length; i += 1) {
@@ -88,6 +127,7 @@ export function parseFrontMatterYaml(text) {
       if (!Array.isArray(parent)) {
         throw new YamlError("block sequence item outside of a sequence");
       }
+      rejectMergeKey(itemText);
       // Reject nested sequence-in-map structures for simplicity.
       parent.push(parseScalar(itemText));
       continue;
@@ -96,6 +136,8 @@ export function parseFrontMatterYaml(text) {
     const colonIdx = content.indexOf(":");
     if (colonIdx < 0) throw new YamlError(`unparsable line: ${trimmed}`);
     const key = content.slice(0, colonIdx).trim();
+    rejectMergeKey(trimmed);
+    safeKey(key, "mapping");
     let valueText = content.slice(colonIdx + 1).trim();
     const isNested = valueText === "" || valueText.startsWith("#");
 
@@ -106,6 +148,10 @@ export function parseFrontMatterYaml(text) {
     const container = stack[stack.length - 1].obj;
     if (!container || typeof container !== "object" || Array.isArray(container)) {
       throw new YamlError("mapping entry outside of a mapping");
+    }
+    // Duplicate key → reject (never last-wins), F-06 / plan §39.
+    if (Object.prototype.hasOwnProperty.call(container, key)) {
+      throw new YamlError(`duplicate mapping key: ${key}`);
     }
 
     if (isNested) {
@@ -122,7 +168,7 @@ export function parseFrontMatterYaml(text) {
         container[key] = [];
         stack.push({ indent, obj: container[key] });
       } else {
-        const childObj = {};
+        const childObj = Object.create(null);
         container[key] = childObj;
         stack.push({ indent, obj: childObj });
       }
@@ -132,6 +178,7 @@ export function parseFrontMatterYaml(text) {
         const hashIdx = valueText.indexOf(" #");
         if (hashIdx >= 0) valueText = valueText.slice(0, hashIdx).trim();
       }
+      rejectTag(valueText);
       container[key] = parseScalar(valueText);
     }
   }
