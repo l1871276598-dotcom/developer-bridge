@@ -47,6 +47,26 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
   const config = await loadVaultConfig(env);
   if (!config) return null;
   const root = await resolveVaultRoot(config.vault.root);
+  // GP5-01: there is exactly ONE vault-root authority. Core reads bytes from
+  // LAOS_VAULT_ROOT (admin config); the Bridge config.vault.root is used only
+  // for partition-map interpretation and MUST canonicalize to the same root.
+  // A mismatch fails closed at startup — it would otherwise let evidence carry
+  // Vault B content under Vault A partition/confidentiality semantics. Like
+  // "not configured", a mismatch makes vault evidence UNAVAILABLE (returns
+  // null) rather than crashing the whole tool.
+  const coreRoot = env.LAOS_VAULT_ROOT;
+  if (typeof coreRoot !== "string" || coreRoot.length === 0) {
+    return null;
+  }
+  let canonicalCoreRoot;
+  try {
+    canonicalCoreRoot = await resolveVaultRoot(coreRoot);
+  } catch {
+    return null;
+  }
+  if (canonicalCoreRoot !== root) {
+    return null;
+  }
   const map = buildPartitionMap(config.partition_rules);
   const workspace = env.LAOS_CHECKPOINT_WORKSPACE;
   const project = env.LAOS_CHECKPOINT_PROJECT;

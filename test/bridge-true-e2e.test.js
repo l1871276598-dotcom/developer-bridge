@@ -417,3 +417,24 @@ test("GP4-01: caller cannot read an arbitrary absolute directory", async (t) => 
   const text = result.content[0].text;
   assert.equal(text.includes("SECRET-READ"), false, "secret content must never leak");
 });
+
+// GP5-01: when Core LAOS_VAULT_ROOT does not canonicalize to the Bridge config
+// vault root, vault evidence must be unavailable (fail-closed) — it would
+// otherwise read Vault B content under Vault A partition semantics.
+test("GP5-01: Bridge/Core vault-root mismatch makes vault.snapshot.publish unavailable", async (t) => {
+  const setup = await coreSetup(t);
+  const otherVault = path.join(setup.base, "other-vault");
+  await mkdir(otherVault);
+  const bridge = await createBridgeWithSyncTools(setup.workspace, () => {}, {
+    operatorIdentity,
+    env: { ...env(setup), LAOS_VAULT_ROOT: otherVault },  // mismatch
+    laosRunCommand: async () => {
+      throw new Error("must not run");
+    },
+  });
+  const result = await bridge.callTool("laos_memory_task", {
+    task: snapshotTask("01-Projects/LAOS/design.md"),
+  });
+  assert.equal(result.isError, true);
+  assert.equal(JSON.parse(result.content[0].text).error.code, "vault_unavailable");
+});

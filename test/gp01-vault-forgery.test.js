@@ -66,6 +66,8 @@ function env(item, overrides = {}) {
     LAOS_CHECKPOINT_PROJECT: PROFILE.project,
     LAOS_CHECKPOINT_CONFIDENTIALITY: PROFILE.confidentiality,
     VAULT_EVIDENCE_CONFIG: path.join(item.base, "vault-config.json"),
+    // GP5-01: Core LAOS_VAULT_ROOT must equal the Bridge config vault root.
+    LAOS_VAULT_ROOT: item.vault,
     ...overrides,
   };
 }
