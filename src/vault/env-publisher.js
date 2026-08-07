@@ -1,10 +1,9 @@
 import { readFile } from "node:fs/promises";
 
 import { buildPartitionMap, resolvePartition } from "./partition-map.js";
-import { buildSnapshotFromRaw } from "./snapshot.js";
+import { buildCanonicalNoteSnapshot } from "./snapshot.js";
 import { readStableVaultNote } from "./stable-read.js";
 import { resolveVaultRoot } from "./vault-root.js";
-import { readNoteIdentity } from "./note-identity.js";
 import { verifyScope } from "./publisher.js";
 
 /**
@@ -73,15 +72,15 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
     }
     const noteRelativePath = input.relative_path;
 
-    // One stable read: identity and payload from the SAME bytes (C-INV-17).
+    // One stable read: identity and payload from the SAME bytes (C-INV-17),
+    // through the single source-byte contract (GP-02).
     const { raw } = await readStableVaultNote(root, noteRelativePath);
-    const identity = readNoteIdentity(raw, noteRelativePath);
     const partition = resolvePartition(map, noteRelativePath);
     const confirmed = verifyScope(partition, profile);
-    const snapshot = buildSnapshotFromRaw(raw, identity, partition);
+    const { identity, input: snapshotInput } = buildCanonicalNoteSnapshot(raw, noteRelativePath, partition);
 
     const evidenceInput = {
-      ...snapshot.input,
+      ...snapshotInput,
       workspace: confirmed.workspace,
       project: confirmed.project,
       confidentiality: confirmed.confidentiality,
