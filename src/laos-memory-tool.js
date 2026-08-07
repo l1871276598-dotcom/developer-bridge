@@ -221,10 +221,14 @@ function normalizeScopedTask(task, env) {
   return { ...normalized, input: normalizedInput };
 }
 
+// GP-04: canonicalization must be prototype-safe. `{}` would treat keys like
+// __proto__/constructor with legacy setter semantics; Object.create(null)
+// gives every key a plain own property so different JSON payloads never
+// canonicalize to the same representation through prototype weirdness.
 function sortedValue(value) {
   if (Array.isArray(value)) return value.map(sortedValue);
   if (isPlainObject(value)) {
-    const sorted = {};
+    const sorted = Object.create(null);
     for (const key of Object.keys(value).sort()) sorted[key] = sortedValue(value[key]);
     return sorted;
   }
@@ -260,6 +264,19 @@ function normalizeEvidenceTask(task, env) {
   }
   const payload = input.payload;
   if (!isPlainObject(payload)) fail("invalid_request");
+  // GP-04 / exact-key schema: the vault snapshot payload allows ONLY content
+  // and metadata.title. Unknown keys (including __proto__/constructor through
+  // prototype quirks) are rejected, never canonicalized ambiguously.
+  const payloadKeys = Object.keys(payload).sort();
+  if (payloadKeys.length !== 2 || payloadKeys[0] !== "content" || payloadKeys[1] !== "metadata") {
+    fail("invalid_request");
+  }
+  const metadata = payload.metadata;
+  if (!isPlainObject(metadata)) fail("invalid_request");
+  const metadataKeys = Object.keys(metadata).sort();
+  if (metadataKeys.length !== 1 || metadataKeys[0] !== "title") {
+    fail("invalid_request");
+  }
 
   // Scope is owned by the Bridge profile, never by the caller. Reject any
   // caller-supplied scope that disagrees with the profile before touching
