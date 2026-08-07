@@ -138,6 +138,27 @@ test("T3: caller injecting source identity / payload is rejected", async (t) => 
   assert.equal(JSON.parse(result.content[0].text).error.code, "invalid_request");
 });
 
+// R2 (Round 3): extra scope fields equal to the trusted profile must NOT be
+// accepted — the vault.snapshot.publish input is exact {relative_path} only,
+// validated before any scope normalization.
+test("R2: caller scope fields equal to trusted profile are rejected, not washed out", async (t) => {
+  const item = await fixture(t);
+  const bridge = await createBridge(item);
+  const result = await bridge.callTool("laos_memory_task", {
+    task: {
+      type: "vault.snapshot.publish",
+      input: {
+        relative_path: "01-Projects/LAOS/design.md",
+        workspace: "personal",
+        project: "laos",
+        confidentiality: "personal",
+      },
+    },
+  });
+  assert.equal(result.isError, true);
+  assert.equal(JSON.parse(result.content[0].text).error.code, "invalid_request");
+});
+
 // T4: caller scope injection → rejected by unified scope policy
 test("T4: caller scope injection on vault.snapshot.publish is rejected", async (t) => {
   const item = await fixture(t);

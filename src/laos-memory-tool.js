@@ -382,11 +382,12 @@ function normalizeTask(args, env) {
   if (!isPlainObject(task.input)) fail("invalid_laos_task");
   let normalized = task;
   if (task.type === "vault.snapshot.publish") {
-    // Vault-owned path: caller provides only relative_path; scope is injected
-    // from the trusted profile (workspace only; vault partitions govern
-    // project/confidentiality via the vault config).
-    normalized = normalizeScopedTask(task, env);
-    normalized = normalizeVaultSnapshotTask(normalized, env);
+    // R2 (Round 3): the caller-supplied input MUST be validated as exact
+    // {relative_path} BEFORE any scope normalization. Otherwise a caller can
+    // smuggle scope fields equal to the trusted profile and have them stripped
+    // by normalizeScopedTask, defeating the exact-input invariant.
+    normalized = normalizeVaultSnapshotTask(task, env);
+    normalized = normalizeScopedTask(normalized, env);
   } else {
     normalized = normalizeScopedTask(task, env);
   }
