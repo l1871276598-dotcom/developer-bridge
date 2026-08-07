@@ -173,3 +173,25 @@ test("S7: inode swap during read (different file, same path) is detected", async
   );
 });
 
+// S8: resolve→open swap — the validated path is replaced with a different
+// inode between validation and open. The opened fd must be rejected because it
+// does not match the resolve-time file object.
+test("S8: path swapped between validation and open is detected", async (t) => {
+  const { vault } = await vaultFixture(t);
+  const notePath = "01-Projects/LAOS/design.md";
+  await writeFile(path.join(vault, notePath), "original\n");
+  const { rename } = await import("node:fs/promises");
+  const attackerPath = path.join(vault, "01-Projects", "LAOS", "attacker.md");
+  await writeFile(attackerPath, "attacker\n");
+  const swapper = async (absolute) => {
+    // Replace the validated path with a different inode before open.
+    const tmp = `${absolute}.swap`;
+    await rename(absolute, tmp);
+    await rename(attackerPath, absolute);
+  };
+  await assert.rejects(
+    readStableVaultNote(vault, notePath, { afterResolve: swapper }),
+    (e) => e.code === "note_changed",
+  );
+});
+

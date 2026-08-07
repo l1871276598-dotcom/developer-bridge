@@ -130,5 +130,5 @@ export async function resolveNotePath(root, notePath) {
   if (!fileStat.isFile()) {
     fail("note_not_file", "note path must identify a regular file");
   }
-  return { absolute, relative };
+  return { absolute, relative, fileStat };
 }

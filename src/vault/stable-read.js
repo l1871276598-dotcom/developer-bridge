@@ -60,6 +60,14 @@ function sameIdentity(a, b) {
   );
 }
 
+// Exact, precision-independent fields — used to compare the resolve-time stat
+// (non-bigint) with the opened descriptor's stat (bigint). Timestamps are
+// excluded because ms-vs-ns rounding differs between stat types; the
+// before/after check below covers timestamps within the same stat type.
+function sameFileObject(a, b) {
+  return a.dev === b.dev && a.ino === b.ino && a.mode === b.mode && a.size === b.size;
+}
+
 /**
  * Read one note's raw bytes through a single stable descriptor.
  * Returns { absolute, raw } where raw is the exact UTF-8 bytes.
@@ -68,7 +76,16 @@ function sameIdentity(a, b) {
  * on the same inode.
  */
 export async function readStableVaultNote(root, noteRelativePath, options = {}) {
-  const { absolute } = await resolveNotePath(root, noteRelativePath);
+  // resolveNotePath performs per-component symlink rejection and returns the
+  // file stat it validated. The opened descriptor below MUST reference the
+  // exact same inode — otherwise a resolve→open swap slipped in.
+  const { absolute, fileStat } = await resolveNotePath(root, noteRelativePath);
+  const resolvedIdentity = identity(fileStat);
+  // afterResolve (test seam): simulate an attacker swapping the path between
+  // validation and open — the exact window S8 must close.
+  if (typeof options.afterResolve === "function") {
+    await options.afterResolve(absolute, fileStat);
+  }
   let handle;
   try {
     handle = await open(absolute, "r");
@@ -82,6 +99,14 @@ export async function readStableVaultNote(root, noteRelativePath, options = {}) 
     }
     if (before.size > BigInt(MAX_NOTE_BYTES)) {
       fail("note_too_large", "note exceeds the size limit");
+    }
+    // S8: the validated path and the opened object must be the same file. If
+    // the inode at resolve time differs from the opened inode, the path was
+    // swapped between validation and open — fail closed. (dev/ino/mode/size are
+    // exact across stat types; timestamps are checked within the fd via the
+    // before/after comparison below.)
+    if (!sameFileObject(identity(before), resolvedIdentity)) {
+      fail("note_changed", "note path changed between validation and open");
     }
     if (typeof options.beforeRead === "function") {
       await options.beforeRead(absolute, before);
