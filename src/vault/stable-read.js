@@ -60,12 +60,21 @@ function sameIdentity(a, b) {
   );
 }
 
-// Exact, precision-independent fields — used to compare the resolve-time stat
-// (non-bigint) with the opened descriptor's stat (bigint). Timestamps are
-// excluded because ms-vs-ns rounding differs between stat types; the
-// before/after check below covers timestamps within the same stat type.
+// Exact, precision-independent file-object identity — used to compare the
+// resolve-time stat with the opened descriptor's stat. Both are bigint stats
+// now (resolveNotePath stats with bigint:true), so the full nanosecond
+// identity (dev/ino/mode/size/mtimeNs/ctimeNs) is comparable. Comparing ctime
+// closes the inode-reuse residual: even if an old inode is unlinked and reused
+// with the same dev/mode/size, the reused file's ctimeNs differs.
 function sameFileObject(a, b) {
-  return a.dev === b.dev && a.ino === b.ino && a.mode === b.mode && a.size === b.size;
+  return (
+    a.dev === b.dev &&
+    a.ino === b.ino &&
+    a.mode === b.mode &&
+    a.size === b.size &&
+    a.mtimeNs === b.mtimeNs &&
+    a.ctimeNs === b.ctimeNs
+  );
 }
 
 /**
@@ -79,7 +88,7 @@ export async function readStableVaultNote(root, noteRelativePath, options = {}) 
   // resolveNotePath performs per-component symlink rejection and returns the
   // file stat it validated. The opened descriptor below MUST reference the
   // exact same inode — otherwise a resolve→open swap slipped in.
-  const { absolute, fileStat } = await resolveNotePath(root, noteRelativePath);
+  const { absolute, relative, fileStat } = await resolveNotePath(root, noteRelativePath);
   const resolvedIdentity = identity(fileStat);
   // afterResolve (test seam): simulate an attacker swapping the path between
   // validation and open — the exact window S8 must close.
@@ -100,11 +109,9 @@ export async function readStableVaultNote(root, noteRelativePath, options = {}) 
     if (before.size > BigInt(MAX_NOTE_BYTES)) {
       fail("note_too_large", "note exceeds the size limit");
     }
-    // S8: the validated path and the opened object must be the same file. If
-    // the inode at resolve time differs from the opened inode, the path was
-    // swapped between validation and open — fail closed. (dev/ino/mode/size are
-    // exact across stat types; timestamps are checked within the fd via the
-    // before/after comparison below.)
+    // S8: the validated path and the opened object must be the same file. Full
+    // identity (incl. ctimeNs) closes the inode-reuse residual — an unlinked
+    // and reused inode carries a new ctime. Both stats are bigint now.
     if (!sameFileObject(identity(before), resolvedIdentity)) {
       fail("note_changed", "note path changed between validation and open");
     }
@@ -116,7 +123,7 @@ export async function readStableVaultNote(root, noteRelativePath, options = {}) 
     if (!sameIdentity(identity(before), identity(after))) {
       fail("note_changed", "note changed during read");
     }
-    return { absolute, raw };
+    return { absolute, relative, raw };
   } finally {
     await handle.close();
   }

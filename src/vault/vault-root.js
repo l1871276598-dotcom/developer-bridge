@@ -126,7 +126,7 @@ export async function resolveNotePath(root, notePath) {
       fail("note_path_symlink", "note path must not traverse a symbolic link");
     }
   }
-  const fileStat = await stat(absolute);
+  const fileStat = await stat(absolute, { bigint: true });
   if (!fileStat.isFile()) {
     fail("note_not_file", "note path must identify a regular file");
   }

@@ -73,11 +73,15 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
     const noteRelativePath = input.relative_path;
 
     // One stable read: identity and payload from the SAME bytes (C-INV-17),
-    // through the single source-byte contract (GP-02).
-    const { raw } = await readStableVaultNote(root, noteRelativePath);
-    const partition = resolvePartition(map, noteRelativePath);
+    // through the single source-byte contract (GP-02). The canonical relative
+    // path returned by the resolver is the ONLY locator used downstream — the
+    // caller's original string never reaches partition/identity/source locator
+    // (GP2-02): the read object, partition, and identity must describe the same
+    // canonical note.
+    const { raw, relative: canonicalRelative } = await readStableVaultNote(root, noteRelativePath);
+    const partition = resolvePartition(map, canonicalRelative);
     const confirmed = verifyScope(partition, profile);
-    const { identity, input: snapshotInput } = buildCanonicalNoteSnapshot(raw, noteRelativePath, partition);
+    const { identity, input: snapshotInput } = buildCanonicalNoteSnapshot(raw, canonicalRelative, partition);
 
     const evidenceInput = {
       ...snapshotInput,

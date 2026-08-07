@@ -195,3 +195,26 @@ test("S8: path swapped between validation and open is detected", async (t) => {
   );
 });
 
+// R9/S8 strengthening: full identity (incl. ctimeNs) must catch an attacker who
+// unlinks the validated note and creates a NEW file at the same path with the
+// same size before open. The new file carries a fresh ctime, so the full
+// identity comparison fails even though dev/mode/size match.
+test("S8: new file created over the validated path (same size) is detected via ctime", async (t) => {
+  const { vault } = await vaultFixture(t);
+  const notePath = "01-Projects/LAOS/design.md";
+  // Same byte length for both files.
+  await writeFile(path.join(vault, notePath), "original!!\n");
+  const { unlink, writeFile: write } = await import("node:fs/promises");
+  const replacer = async (absolute) => {
+    // Unlink the validated note and create a brand-new file at the same path.
+    // macOS may or may not reuse the same inode, but ctime always differs for a
+    // newly created inode — the full-identity check must reject regardless.
+    await unlink(absolute);
+    await write(absolute, "attacker!!\n");
+  };
+  await assert.rejects(
+    readStableVaultNote(vault, notePath, { afterResolve: replacer }),
+    (e) => e.code === "note_changed",
+  );
+});
+
