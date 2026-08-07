@@ -32,8 +32,9 @@ function safeKey(key, context) {
   if (UNSAFE_KEYS.has(key)) {
     throw new YamlError(`unsafe mapping key ${JSON.stringify(key)}${context ? ` in ${context}` : ""}`);
   }
-  if (/^[&*]/.test(key)) {
-    throw new YamlError(`anchor/alias keys are not supported: ${JSON.stringify(key)}`);
+  // Any YAML tag introducer in a key position is rejected.
+  if (/^!/.test(key) || /^&/.test(key) || /^\*/.test(key)) {
+    throw new YamlError(`tag/anchor/alias keys are not supported: ${JSON.stringify(key)}`);
   }
   if (/^\[.*\]$/.test(key) || /^\{.*\}$/.test(key)) {
     throw new YamlError(`complex mapping keys are not supported: ${JSON.stringify(key)}`);
@@ -48,13 +49,14 @@ function rejectMergeKey(text) {
   }
 }
 
-// Reject explicit tags (`!!tag`, `!tag`) and anchors/aliases (`&a`, `*a`)
-// in scalar or value position.
+// Reject explicit tags (`!!tag`, `!tag`, `!<tag:...>`) and anchors/aliases
+// (`&a`, `*a`) in scalar or value position. Any leading `!` is a tag
+// introducer in YAML; reject all of them rather than whitelist patterns.
 function rejectTag(text) {
-  if (/^!{1,2}[\w.-]+/.test(text)) {
+  if (text.startsWith("!")) {
     throw new YamlError(`YAML tags are not supported: ${JSON.stringify(text)}`);
   }
-  if (/^&[\w.-]+/.test(text) || /^\*[\w.-]+/.test(text)) {
+  if (text.startsWith("&") || text.startsWith("*")) {
     throw new YamlError(`YAML anchors/aliases are not supported: ${JSON.stringify(text)}`);
   }
 }
@@ -88,11 +90,15 @@ function parseScalar(raw) {
   if (text.startsWith("{") && text.endsWith("}")) {
     const inner = text.slice(1, -1).trim();
     if (inner === "") return {};
-    const out = {};
+    // Object.create(null): __proto__/constructor keys must not land on a
+    // prototype chain. Keys also go through safeKey so tags/anchors/complex
+    // keys are rejected.
+    const out = Object.create(null);
     for (const pair of inner.split(",")) {
       const idx = pair.indexOf(":");
       if (idx < 0) throw new YamlError("invalid flow map entry");
-      const key = parseScalar(pair.slice(0, idx)).toString();
+      const rawKey = parseScalar(pair.slice(0, idx)).toString();
+      const key = safeKey(rawKey, "flow map");
       if (Object.prototype.hasOwnProperty.call(out, key)) {
         throw new YamlError(`duplicate key in flow map: ${key}`);
       }

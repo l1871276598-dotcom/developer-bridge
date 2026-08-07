@@ -69,7 +69,11 @@ tags: [a, b, c]
 meta: {k: v, n: 1}
 `);
   assert.deepEqual(obj.tags, ["a", "b", "c"]);
-  assert.deepEqual(obj.meta, { k: "v", n: 1 });
+  // Flow maps are Object.create(null) (prototype-pollution defense), so assert
+  // fields individually.
+  assert.equal(obj.meta.k, "v");
+  assert.equal(obj.meta.n, 1);
+  assert.equal(Object.getPrototypeOf(obj.meta), null);
 });
 
 test("parses mixed nesting: sequence of nested objects stays scalar-safe", () => {
