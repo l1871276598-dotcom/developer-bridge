@@ -86,6 +86,8 @@ function env(setup) {
     LAOS_DATA_ROOT: setup.dataRoot,
     LAOS_STATE_DIR: setup.stateDir,
     LAOS_PYTHON_EXECUTABLE: PYTHON,
+    // GP4-01: the trusted vault root is Core-side authority from admin config.
+    LAOS_VAULT_ROOT: setup.vault,
     DEVELOPER_BRIDGE_CAPABILITY_PROFILE: "controlled-engineering-v1",
     LAOS_CHECKPOINT_WORKSPACE: PROFILE.workspace,
     LAOS_CHECKPOINT_PROJECT: PROFILE.project,
@@ -392,4 +394,26 @@ test("GP3-01: intermediate-directory symlink to a vault-outside dir fails publis
   assert.equal(result.isError, true, "intermediate symlink must be rejected");
   const text = result.content[0].text;
   assert.equal(text.includes("OUTSIDE-DIR-SECRET"), false, "outside dir content must never leak");
+});
+
+// GP4-01 (Round 4): the vault root is Core-side authority (LAOS_VAULT_ROOT).
+// A caller cannot supply a vault_root to read arbitrary files, and the
+// vault.snapshot.publish input is still exact {relative_path}.
+test("GP4-01: caller cannot read an arbitrary absolute directory", async (t) => {
+  const setup = await coreSetup(t);
+  const { bridge } = await createTrueBridge(setup);
+  const secretDir = path.join(setup.base, "secret-dir");
+  await mkdir(secretDir);
+  await writeFile(path.join(secretDir, "top.txt"), "SECRET-READ\n");
+  // vault.snapshot.publish only accepts {relative_path}; there is no way to
+  // steer the read to an arbitrary root through the Bridge public interface.
+  const result = await bridge.callTool("laos_memory_task", {
+    task: {
+      type: "vault.snapshot.publish",
+      input: { relative_path: "../../top.txt" },  // traversal intent
+    },
+  });
+  assert.equal(result.isError, true);
+  const text = result.content[0].text;
+  assert.equal(text.includes("SECRET-READ"), false, "secret content must never leak");
 });

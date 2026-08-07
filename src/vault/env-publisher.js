@@ -65,12 +65,14 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
   };
 
   // Core `vault.read`: fd-rooted traversal in Python closes GP3-01. The same
-  // runner invokes the Core CLI restricted task interface.
+  // runner invokes the Core CLI restricted task interface. GP4-01: the caller
+  // (and the Bridge) never supply vault_root — Core derives it from its own
+  // administrator config (LAOS_VAULT_ROOT). The task carries only relative_path.
   const vaultRead = async (relativePath) => {
     const { runCli } = await import("./laos-publisher.js");
     const task = {
       type: "vault.read",
-      input: { vault_root: root, relative_path: relativePath },
+      input: { relative_path: relativePath },
     };
     const stdout = await runCli(env, JSON.stringify(task), codeRoot);
     let parsed;
