@@ -32,9 +32,14 @@ function sha256Hex(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+// GP5-02/R15: git status by default refreshes the index (writes back cached
+// stat info), so laos_bridge_info would have a side effect. --no-optional-locks
+// suppresses that write, keeping bridge_info strictly read-only. rev-parse is
+// inherently read-only.
 async function gitAt(cwd, ...args) {
+  const gitArgs = args[0] === "status" ? ["--no-optional-locks", ...args] : args;
   try {
-    const { stdout } = await execFileAsync("git", args, { cwd, timeout: 10_000 });
+    const { stdout } = await execFileAsync("git", gitArgs, { cwd, timeout: 10_000 });
     return stdout.trim();
   } catch {
     return null;

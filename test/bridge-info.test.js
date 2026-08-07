@@ -113,3 +113,32 @@ test("C-INV-19: allowlist digest is stable and recomputable from the frozen allo
   assert.equal(info.bridge.allowlist_sha256, expected);
   assert.equal(info.bridge.allowlist_sha256.length, 64);
 });
+
+// GP5-02/R15: bridge_info must be strictly read-only — .git/index hash and
+// mtime must not change across a call, even with a dirty working tree (where
+// a plain `git status` would refresh the index stat cache).
+test("GP5-02: bridge_info does not mutate .git/index (--no-optional-locks)", async (t) => {
+  const repoDir = await repo(t);
+  const { stat, readFile } = await import("node:fs/promises");
+  const { createHash } = await import("node:crypto");
+  // Make the stat cache stale: modify a tracked file so git status would want
+  // to refresh the index.
+  await writeFile(path.join(repoDir, "file.txt"), "changed\n");
+  const indexPath = path.join(repoDir, ".git", "index");
+  const before = await stat(indexPath);
+  const beforeMtime = before.mtimeMs;
+  const beforeHash = createHash("sha256").update(await readFile(indexPath)).digest("hex");
+  // Small delay so a write would be observable via mtime.
+  await new Promise((r) => setTimeout(r, 20));
+
+  const bridge = await createBridgeWithSyncTools(repoDir, () => {}, { operatorIdentity, env: { ...process.env, DEVELOPER_BRIDGE_CAPABILITY_PROFILE: "controlled-engineering-v1" } });
+  const result = await bridge.callTool("laos_bridge_info", {});
+  assert.equal(result.isError, undefined, result.content?.[0]?.text);
+
+  const after = await stat(indexPath);
+  const afterMtime = after.mtimeMs;
+  const afterHash = createHash("sha256").update(await readFile(indexPath)).digest("hex");
+  assert.equal(afterHash, beforeHash, ".git/index content must not change");
+  assert.equal(afterMtime, beforeMtime, ".git/index mtime must not change (no stat refresh)");
+});
+
