@@ -67,6 +67,14 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
   if (canonicalCoreRoot !== root) {
     return null;
   }
+  // GP6-01: the verified canonical root is FROZEN here and explicitly injected
+  // into the child-process environment. Neither runCli's `...process.env`
+  // merge nor any later dynamic `env` change can substitute a different
+  // LAOS_VAULT_ROOT — the Core child always reads from this exact root.
+  const childEnv = {
+    ...env,
+    LAOS_VAULT_ROOT: canonicalCoreRoot,
+  };
   const map = buildPartitionMap(config.partition_rules);
   const workspace = env.LAOS_CHECKPOINT_WORKSPACE;
   const project = env.LAOS_CHECKPOINT_PROJECT;
@@ -77,10 +85,10 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
 
   // The evidence.publish forwarding uses the default runCli (resolving the CLI
   // under codeRoot and spawning env.LAOS_PYTHON_EXECUTABLE), the same fixed
-  // runner shape as laos_memory_task.
+  // runner shape as laos_memory_task. childEnv carries the frozen verified root.
   const publish = async (evidenceInput) => {
     const { buildLaosEvidencePublisher } = await import("./laos-publisher.js");
-    const publisher = buildLaosEvidencePublisher({ env, codeRoot });
+    const publisher = buildLaosEvidencePublisher({ env: childEnv, codeRoot });
     return publisher(evidenceInput);
   };
 
@@ -94,7 +102,7 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
       type: "vault.read",
       input: { relative_path: relativePath },
     };
-    const stdout = await runCli(env, JSON.stringify(task), codeRoot);
+    const stdout = await runCli(childEnv, JSON.stringify(task), codeRoot);
     let parsed;
     try {
       parsed = JSON.parse(stdout);
