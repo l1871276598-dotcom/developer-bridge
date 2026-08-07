@@ -112,6 +112,7 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
   const structuredGitTools = createStructuredGitTools(workspaceContext);
   const laosMemoryTool = await createLaosMemoryTool(env, () => activeRoot, {
     runCommand: options.laosRunCommand,
+    vaultPublish: options.vaultPublish,
   });
   const laosCheckpointTools = await createLaosCheckpointTools(env, identity.root, {
     runCommand: options.laosCheckpointRunCommand,

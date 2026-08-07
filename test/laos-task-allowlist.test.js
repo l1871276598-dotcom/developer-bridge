@@ -22,7 +22,7 @@ const EXPECTED_FROZEN_TASKS = Object.freeze([
   "memory.search",
   "context.build",
   "handoff.write",
-  "evidence.publish",
+  "vault.snapshot.publish",
   "loop.reflect",
   "loop.suggest-policies",
   "loop.generate-candidate",
@@ -69,31 +69,29 @@ function env(item) {
 
 async function createBridgeWithSpy(item) {
   let calls = 0;
+  let vaultCalls = 0;
   const bridge = await createBridgeWithSyncTools(item.workspace, () => {}, {
     operatorIdentity,
     env: env(item),
     laosRunCommand: async (command, args) => {
       calls += 1;
-      // evidence.publish must round-trip the derived canonical identity
-      // (C-INV-14); echo it back so the dispatcher validation passes.
-      const idx = args.indexOf("--task-json") + 1;
-      let payload = { ok: true };
-      if (idx > 0) {
-        const task = JSON.parse(args[idx]);
-        if (task.type === "evidence.publish") {
-          const { note_id, source_sha256 } = task.input.source;
-          payload = { ok: true, result: { canonical_identity: `vault-note:${note_id}@${source_sha256}` } };
-        }
-      }
+      return { exitCode: 0, signal: null, stdout: `${JSON.stringify({ ok: true })}\n`, stderr: "" };
+    },
+    vaultPublish: async (input) => {
+      vaultCalls += 1;
       return {
-        exitCode: 0,
-        signal: null,
-        stdout: `${JSON.stringify(payload)}\n`,
-        stderr: "",
+        canonical_identity: "vault-note:test@x",
+        note_id: "test",
+        source_sha256: "0".repeat(64),
+        identity_state: "front_matter",
+        source_ref: "artifact:test",
+        artifact_sha256: "test",
+        payload_sha256: "0".repeat(64),
+        partition: { workspace: "personal", project: "laos", confidentiality: "personal" },
       };
     },
   });
-  return { bridge, spy: { get calls() { return calls; } } };
+  return { bridge, spy: { get calls() { return calls; }, get vaultCalls() { return vaultCalls; } } };
 }
 
 test("ALLOWED_LAOS_TASKS equals the frozen allowlist exactly, no more and no less", () => {
@@ -195,31 +193,12 @@ for (const allowed of ["memory.search", "context.build"]) {
 test("passes every remaining allowlisted task type through the Bridge dispatcher", async (t) => {
   const item = await fixture(t);
   const { bridge, spy } = await createBridgeWithSpy(item);
-  const evidencePayload = { content: "note body", metadata: { title: "t" } };
-  const crypto = await import("node:crypto");
-  const canonicalJsonFor = (value) => {
-    const sorted = (v) => {
-      if (Array.isArray(v)) return v.map(sorted);
-      if (v !== null && typeof v === "object" && !Array.isArray(v)) {
-        return Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted(v[k])]));
-      }
-      return v;
-    };
-    return JSON.stringify(sorted(value));
-  };
-  const evidenceSha = crypto.createHash("sha256").update(canonicalJsonFor(evidencePayload)).digest("hex");
-  const sourceSha = crypto.createHash("sha256").update("note body").digest("hex");
   const sampler = {
     "memory.create": { type: "principle", title: "t", scope: "global", workspace: "personal", confidentiality: "personal", source: "manual:user_confirmed", confidence: "confirmed", content: "c" },
     "context.build": { query: "t" },
     "handoff.write": { project_slug: "p", content: "# h" },
-    "evidence.publish": {
-      schema_version: 2,
-      kind: "vault_note_snapshot",
-      source: { scheme: "vault-note", note_id: "01HXYZ", source_sha256: sourceSha },
-      locator: { relative_path: "P/t.md" },
-      payload: evidencePayload,
-      payload_sha256: evidenceSha,
+    "vault.snapshot.publish": {
+      relative_path: "P/t.md",
     },
     "loop.reflect": {},
     "loop.suggest-policies": {},
@@ -231,11 +210,17 @@ test("passes every remaining allowlisted task type through the Bridge dispatcher
   };
 
   for (const taskType of EXPECTED_FROZEN_TASKS) {
-    const before = spy.calls;
+    const beforeCalls = spy.calls;
+    const beforeVault = spy.vaultCalls;
     const result = await bridge.callTool("laos_memory_task", {
       task: { type: taskType, workspace: "personal", input: sampler[taskType] ?? {} },
     });
     assert.equal(result.isError, undefined, `${taskType}: ${result.content?.[0]?.text}`);
-    assert.equal(spy.calls, before + 1, `${taskType} should reach the runner`);
+    if (taskType === "vault.snapshot.publish") {
+      assert.equal(spy.vaultCalls, beforeVault + 1, `${taskType} should reach the vault publisher`);
+      assert.equal(spy.calls, beforeCalls, `${taskType} should NOT reach the Core runner`);
+    } else {
+      assert.equal(spy.calls, beforeCalls + 1, `${taskType} should reach the runner`);
+    }
   }
 });

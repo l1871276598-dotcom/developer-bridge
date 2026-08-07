@@ -159,15 +159,15 @@ test("F-01 REJECT: caller confidentiality escalation via input.confidentiality",
   assert.equal(spy.calls, 0);
 });
 
-test("F-01 REJECT: evidence.publish with caller top-level workspace=work", async (t) => {
+test("F-01 REJECT: vault.snapshot.publish with caller top-level workspace=work", async (t) => {
   const item = await fixture(t);
   const { bridge, spy } = await createBridgeWithSpy(item);
 
   const result = await bridge.callTool("laos_memory_task", {
     task: {
-      type: "evidence.publish",
+      type: "vault.snapshot.publish",
       workspace: "work",
-      input: { kind: "vault_note_snapshot", source_identity: { scheme: "vault-note", note_id: "01HXYZ", relative_path: "P/t.md" }, payload: { a: 1 }, payload_sha256: "f".repeat(64) },
+      input: { relative_path: "P/t.md" },
     },
   });
 

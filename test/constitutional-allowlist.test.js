@@ -11,7 +11,7 @@ const EXPECTED = Object.freeze([
   "memory.search",
   "context.build",
   "handoff.write",
-  "evidence.publish",
+  "vault.snapshot.publish",
   "loop.reflect",
   "loop.suggest-policies",
   "loop.generate-candidate",

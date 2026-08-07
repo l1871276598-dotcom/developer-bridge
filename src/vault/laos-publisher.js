@@ -17,15 +17,15 @@ function findCodeRoot() {
   return workspace;
 }
 
-function findCli() {
-  const codeRoot = findCodeRoot();
-  const cli = path.join(codeRoot, "src", "laos.py");
+function findCli(codeRoot) {
+  const resolved = codeRoot ?? findCodeRoot();
+  const cli = path.join(resolved, "src", "laos.py");
   return cli;
 }
 
-function runCli(env, taskJson) {
+function runCli(env, taskJson, codeRoot) {
   return new Promise((resolve, reject) => {
-    const cli = findCli();
+    const cli = findCli(codeRoot);
     const args = [
       cli,
       "--root", env.LAOS_DATA_ROOT,
@@ -59,7 +59,7 @@ function runCli(env, taskJson) {
  * the LAOS CLI.  The normalized task is the exact payload the laos_memory_task
  * dispatcher would forward, so behavior is identical to a live Bridge call.
  */
-export function buildLaosEvidencePublisher({ env, runner } = {}) {
+export function buildLaosEvidencePublisher({ env, runner, codeRoot } = {}) {
   const run = runner ?? runCli;
   const profileEnv = env ?? process.env;
   return async (input) => {
@@ -67,7 +67,7 @@ export function buildLaosEvidencePublisher({ env, runner } = {}) {
       { type: "evidence.publish", input },
       profileEnv,
     );
-    const stdout = await run(profileEnv, JSON.stringify(task));
+    const stdout = await run(profileEnv, JSON.stringify(task), codeRoot);
     let parsed;
     try {
       parsed = JSON.parse(stdout);

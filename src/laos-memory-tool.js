@@ -12,7 +12,7 @@ export const FROZEN_LAOS_TASKS = Object.freeze([
   "memory.search",
   "context.build",
   "handoff.write",
-  "evidence.publish",
+  "vault.snapshot.publish",
   "loop.reflect",
   "loop.suggest-policies",
   "loop.generate-candidate",
@@ -165,7 +165,12 @@ const SCOPE_INPUT_TASKS = Object.freeze({
   "memory.search": ["workspace", "project"],
   "context.build": ["workspace", "project"],
   "handoff.write": ["workspace"],
+  // evidence.publish is NOT an external dispatcher task (GP-01); it is the
+  // internal-only publication target the Bridge-owned Vault publisher forwards
+  // to Core. Its Core agent reads scope from input, so the internal normalizer
+  // must know where to inject.
   "evidence.publish": ["workspace", "project", "confidentiality"],
+  "vault.snapshot.publish": [],
   "loop.reflect": [],
   "loop.suggest-policies": [],
   "loop.generate-candidate": [],
@@ -323,6 +328,26 @@ export function normalizeEvidenceIngress(task, env) {
   return { task: normalized, expectedIdentity };
 }
 
+// GP-01 (Phase 1): `vault.snapshot.publish` is the ONLY external task that can
+// produce a vault-backed evidence artifact. The caller supplies ONLY a
+// relative_path; the Bridge performs the trusted Vault read + identity +
+// partition resolution. Caller-supplied scope/source/payload are rejected —
+// scope comes from the trusted profile, source identity and payload come from
+// the Vault read. Anything else is invalid_request.
+function normalizeVaultSnapshotTask(task, env) {
+  const input = task.input;
+  if (!isPlainObject(input)) fail("invalid_request");
+  const keys = Object.keys(input);
+  if (keys.length !== 1 || keys[0] !== "relative_path") {
+    fail("invalid_request");
+  }
+  const relativePath = input.relative_path;
+  if (typeof relativePath !== "string" || relativePath.length === 0) {
+    fail("invalid_request");
+  }
+  return { ...task, input: { relative_path: relativePath } };
+}
+
 function normalizeTask(args, env) {
   if (!isPlainObject(args) || Object.keys(args).some((key) => key !== "task")) {
     fail("invalid_laos_task");
@@ -339,21 +364,18 @@ function normalizeTask(args, env) {
   }
   if (!isPlainObject(task.input)) fail("invalid_laos_task");
   let normalized = task;
-  let expectedIdentity = null;
-  if (task.type === "evidence.publish") {
-    // evidence.publish carries scope inside task.input, which Core's
-    // EvidenceAgent reads. The unified gate below normalizes top-level scope;
-    // the evidence normalizer additionally injects trusted scope into input.
+  if (task.type === "vault.snapshot.publish") {
+    // Vault-owned path: caller provides only relative_path; scope is injected
+    // from the trusted profile (workspace only; vault partitions govern
+    // project/confidentiality via the vault config).
     normalized = normalizeScopedTask(task, env);
-    normalized = normalizeEvidenceTask(normalized, env);
-    expectedIdentity = normalized._expected_canonical_identity;
-    delete normalized._expected_canonical_identity;
+    normalized = normalizeVaultSnapshotTask(normalized, env);
   } else {
     normalized = normalizeScopedTask(task, env);
   }
   const encoded = JSON.stringify(normalized);
   if (Buffer.byteLength(encoded, "utf8") > MAX_TASK_BYTES) fail("invalid_laos_task");
-  return { encoded, expectedIdentity };
+  return { encoded, expectedIdentity: null, type: task.type, input: normalized.input };
 }
 
 function safeEnvironment(env) {
@@ -464,13 +486,43 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
   await resolveCli(initialCodeRoot);
   const runner = options.runCommand || runFixed;
 
+  // Vault-owned evidence publisher (GP-01): injected by the host, or built
+  // from the environment's vault configuration. It performs the trusted Vault
+  // read + identity + partition resolution and then publishes through Core
+  // evidence.publish (internal). The Bridge never forwards a caller-constructed
+  // vault payload.
+  let vaultPublish = options.vaultPublish;
+  if (!vaultPublish) {
+    const { buildEnvVaultPublisher } = await import("./vault/env-publisher.js");
+    vaultPublish = await buildEnvVaultPublisher(env, { codeRoot: initialCodeRoot, runner });
+  }
+
   return Object.freeze({
     definition: LAOS_MEMORY_TOOL_DEFINITION,
     async call(args) {
-      const { encoded: taskJson, expectedIdentity } = normalizeTask(args, env);
+      const { encoded: taskJson, expectedIdentity, type, input } = normalizeTask(args, env);
       const codeRoot = await canonicalDirectory(getCodeRoot(), "Authorized workspace");
       requireSeparatedRoots(runtimeRoot, codeRoot, dataRoot, stateDir);
       const cli = await resolveCli(codeRoot);
+
+      if (type === "vault.snapshot.publish") {
+        // GP-01: only the Bridge-owned Vault adapter may mint a vault evidence
+        // artifact. The caller supplies only relative_path; the adapter reads
+        // the Vault, derives identity, resolves the partition, and publishes
+        // through Core. Without a configured adapter this fails closed.
+        if (!vaultPublish) {
+          fail("vault_unavailable", { message: "Vault evidence publishing is not configured" });
+        }
+        const payload = await vaultPublish(input);
+        return {
+          text: JSON.stringify(redact(payload, [
+            [codeRoot, "[workspace]"],
+            [dataRoot, "[laos-data]"],
+            [stateDir, "[laos-state]"],
+          ])),
+        };
+      }
+
       const result = await runner(
         process.platform === "win32" ? "python" : "python3",
         [cli, "--root", dataRoot, "--state-dir", stateDir, "--task-json", taskJson],
