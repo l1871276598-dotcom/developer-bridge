@@ -121,6 +121,11 @@ export function parseFrontMatterYaml(text) {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     if (line.trim() === "" || line.trim().startsWith("#")) continue;
+    // YAML forbids tab for indentation (R11): a tab at any indentation position
+    // is ambiguous and must fail closed rather than be silently re-indented.
+    if (line.startsWith("\t")) {
+      throw new YamlError("tab-indented lines are not supported");
+    }
     const indentMatch = INDENT_RE.exec(line);
     const indent = indentMatch[1].length;
     const content = line.slice(indent);

@@ -42,3 +42,12 @@ test("S10: __proto__ never lands on the prototype chain of any container", () =>
   const obj = parseFrontMatterYaml(`title: safe\n`);
   assert.equal(Object.getPrototypeOf(obj), null);
 });
+
+// R11 (Round 3): tab indentation is ambiguous YAML and must fail closed.
+test("R11: rejects tab-indented lines", () => {
+  assert.throws(() => parseFrontMatterYaml("id: x\n\tmeta: y\n"), { name: "YamlError" });
+});
+
+test("R11: rejects a leading-tab directive-style line", () => {
+  assert.throws(() => parseFrontMatterYaml("\t%YAML 1.2\nid: x\n"), { name: "YamlError" });
+});
