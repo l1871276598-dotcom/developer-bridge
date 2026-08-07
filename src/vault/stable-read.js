@@ -3,7 +3,7 @@ import { open } from "node:fs/promises";
 import { resolveNotePath } from "./vault-root.js";
 
 /**
- * Single stable Vault note read (C-INV-17 / F-04 TOCTOU).
+ * Single stable Vault note read (C-INV-17 / F-04 TOCTOU, hardened S7).
  *
  * Identity and payload MUST derive from ONE stable read.  The raw bytes from a
  * single open descriptor feed both parseFrontMatter (identity) and the
@@ -15,8 +15,11 @@ import { resolveNotePath } from "./vault-root.js";
  *   supported) → fstat before → read the one fd → fstat after → same stable
  *   file? → raw bytes.
  *
- * Any mismatch (before/after identity, non-regular file, size change) fails
- * closed with `note_changed` — never a silently stale read.
+ * Mutation detection compares the full stable identity: dev, ino, mode, size,
+ * mtime (nanosecond precision when available) and ctime. Any change fails
+ * closed with `note_changed` — never a silently stale read. Comparing ctime
+ * catches an attacker who rewrites the same inode with the same size and then
+ * restores mtime (ctime always bumps on inode metadata change).
  */
 
 const MAX_NOTE_BYTES = 512 * 1024;
@@ -33,22 +36,38 @@ function fail(code, message) {
   throw new StableReadError(code, message);
 }
 
+// Nanosecond-precision identity. BigInt stats expose mtimeNs/ctimeNs directly;
+// non-BigInt stats fall back to mtimeMs/ctimeMs (millisecond precision).
 function identity(stat) {
   return {
-    dev: stat.dev,
-    ino: stat.ino,
-    mode: stat.mode,
-    size: stat.size,
-    mtimeNs: stat.mtimeNs ?? stat.mtimeMs * 1_000_000,
-    ctimeNs: stat.ctimeNs ?? stat.ctimeMs * 1_000_000,
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+    mode: String(stat.mode),
+    size: String(stat.size),
+    mtimeNs: stat.mtimeNs !== undefined ? String(stat.mtimeNs) : String(BigInt(Math.trunc(stat.mtimeMs * 1_000_000))),
+    ctimeNs: stat.ctimeNs !== undefined ? String(stat.ctimeNs) : String(BigInt(Math.trunc(stat.ctimeMs * 1_000_000))),
   };
+}
+
+function sameIdentity(a, b) {
+  return (
+    a.dev === b.dev &&
+    a.ino === b.ino &&
+    a.mode === b.mode &&
+    a.size === b.size &&
+    a.mtimeNs === b.mtimeNs &&
+    a.ctimeNs === b.ctimeNs
+  );
 }
 
 /**
  * Read one note's raw bytes through a single stable descriptor.
  * Returns { absolute, raw } where raw is the exact UTF-8 bytes.
+ * options.beforeRead (test seam): an async hook invoked after fstat-before and
+ * before readFile, so tests can deterministically simulate a concurrent writer
+ * on the same inode.
  */
-export async function readStableVaultNote(root, noteRelativePath) {
+export async function readStableVaultNote(root, noteRelativePath, options = {}) {
   const { absolute } = await resolveNotePath(root, noteRelativePath);
   let handle;
   try {
@@ -57,22 +76,19 @@ export async function readStableVaultNote(root, noteRelativePath) {
     fail("note_unreadable", "note could not be opened");
   }
   try {
-    const before = await handle.stat();
+    const before = await handle.stat({ bigint: true });
     if (!before.isFile()) {
       fail("note_not_file", "note must be a regular file");
     }
-    if (before.size > MAX_NOTE_BYTES) {
+    if (before.size > BigInt(MAX_NOTE_BYTES)) {
       fail("note_too_large", "note exceeds the size limit");
     }
+    if (typeof options.beforeRead === "function") {
+      await options.beforeRead(absolute, before);
+    }
     const raw = await handle.readFile("utf8");
-    const after = await handle.stat();
-    if (
-      before.dev !== after.dev ||
-      before.ino !== after.ino ||
-      before.mode !== after.mode ||
-      before.size !== after.size ||
-      before.mtimeMs !== after.mtimeMs
-    ) {
+    const after = await handle.stat({ bigint: true });
+    if (!sameIdentity(identity(before), identity(after))) {
       fail("note_changed", "note changed during read");
     }
     return { absolute, raw };

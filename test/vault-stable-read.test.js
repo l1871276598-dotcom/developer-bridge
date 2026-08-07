@@ -127,3 +127,49 @@ test("buildNoteIdentity from raw bytes is deterministic and path-agnostic", () =
   assert.equal(a.source_sha256, b.source_sha256);
   assert.equal(a.canonical_identity, b.canonical_identity);
 });
+
+// S7: same-inode mutation during read — same size, restored mtime, but ctime
+// changes. The read MUST fail closed (note_changed), never silently return a
+// stale read. Uses the deterministic beforeRead seam to simulate the writer
+// landing between fstat-before and readFile.
+test("S7: same-inode same-size mutation during read is detected via ctime", async (t) => {
+  const { vault } = await vaultFixture(t);
+  const notePath = "01-Projects/LAOS/design.md";
+  // Same byte length so size does not change.
+  await writeFile(path.join(vault, notePath), "payload A\n");
+  const mutator = async (absolute) => {
+    // Rewrite the same inode with same-size content (truncate+write keeps the
+    // inode; ctime always bumps even if mtime is restored later).
+    const { open } = await import("node:fs/promises");
+    const fh = await open(absolute, "r+");
+    try {
+      await fh.write("payload B\n"); // same length as "payload A\n"
+    } finally {
+      await fh.close();
+    }
+  };
+  await assert.rejects(
+    readStableVaultNote(vault, notePath, { beforeRead: mutator }),
+    (e) => e.code === "note_changed",
+  );
+});
+
+test("S7: inode swap during read (different file, same path) is detected", async (t) => {
+  const { vault } = await vaultFixture(t);
+  const notePath = "01-Projects/LAOS/design.md";
+  await writeFile(path.join(vault, notePath), "original\n");
+  const { rename } = await import("node:fs/promises");
+  const swapPath = path.join(vault, "01-Projects", "LAOS", "swap.md");
+  await writeFile(swapPath, "attacker\n");
+  const swapper = async (absolute) => {
+    // Swap the note with a different inode mid-read.
+    const tmp = `${absolute}.tmp`;
+    await rename(absolute, tmp);
+    await rename(swapPath, absolute);
+  };
+  await assert.rejects(
+    readStableVaultNote(vault, notePath, { beforeRead: swapper }),
+    (e) => e.code === "note_changed",
+  );
+});
+
