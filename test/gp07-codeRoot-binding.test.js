@@ -7,6 +7,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { createLaosMemoryTool } from "../src/laos-memory-tool.js";
+import { runCli } from "../src/vault/laos-publisher.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -94,9 +95,46 @@ test("GP7-02: vault.snapshot.publish uses the current codeRoot, not the construc
   assert.notEqual(receivedRoots[1], item.workspaceA, "must not use the stale construction-time root");
 });
 
-// The dispatcher re-validates the current root BEFORE routing to the vault
-// publisher; a workspace that no longer contains a safe CLI must fail before
-// the publisher is reached.
+// GP7-04: runCli is a bounded spawn — a hung Core child is killed via the
+// timeout, and a chatty child is killed via the output cap, so a malicious
+// vault FIFO (or any unresponsive CLI) can never block the Bridge forever.
+function makeFakeCli(dir, body) {
+  // The fake "python" is a shell script named LAOS_PYTHON_EXECUTABLE.
+  const fake = path.join(dir, "fake-python.sh");
+  return writeFile(fake, `#!/bin/sh\n${body}\n`, { mode: 0o755 }).then(() => fake);
+}
+
+async function fakeWorkspace(base) {
+  const ws = path.join(base, "w");
+  await mkdir(path.join(ws, "src"), { recursive: true });
+  await writeFile(path.join(ws, "src", "laos.py"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await git(ws, "init", "--quiet", "-b", "main");
+  await git(ws, "config", "user.name", "Test User");
+  await git(ws, "config", "user.email", "test@example.invalid");
+  await git(ws, "add", "src/laos.py");
+  await git(ws, "commit", "--quiet", "-m", "fixture");
+  return ws;
+}
+
+test("GP7-04: runCli kills a hung Core child (timeout, not forever)", async (t) => {
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "bridge-gp07-timeout-")));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const ws = await fakeWorkspace(base);
+  const fake = await makeFakeCli(base, "sleep 300");
+  const env = { LAOS_DATA_ROOT: "/tmp", LAOS_STATE_DIR: "/tmp", LAOS_PYTHON_EXECUTABLE: fake };
+  const start = Date.now();
+  await assert.rejects(runCli(env, "{}", ws, { timeoutMs: 300 }), /timed out/i);
+  assert.ok(Date.now() - start < 5_000, "must not block for the full 300s sleep");
+});
+
+test("GP7-04: runCli kills a chatty Core child (output cap, no unbounded buffering)", async (t) => {
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "bridge-gp07-cap-")));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const ws = await fakeWorkspace(base);
+  const fake = await makeFakeCli(base, 'i=0; while [ $i -lt 800000 ]; do echo "x"; i=$((i+1)); done');
+  const env = { LAOS_DATA_ROOT: "/tmp", LAOS_STATE_DIR: "/tmp", LAOS_PYTHON_EXECUTABLE: fake };
+  await assert.rejects(runCli(env, "{}", ws), /output limit exceeded/i);
+});
 test("GP7-02: a workspace swap to a dir without a safe CLI fails closed before the publisher runs", async (t) => {
   const item = await fixture(t);
   const broken = path.join(item.workspaceA, "..", "noclone");

@@ -3,6 +3,9 @@ import path from "node:path";
 
 import { normalizeEvidenceIngress } from "../laos-memory-tool.js";
 
+const RUNCLI_TIMEOUT_MS = 120_000;
+const RUNCLI_MAX_OUTPUT_BYTES = 1024 * 1024;
+
 /**
  * evidence.publish invocation through the LAOS CLI — the same task shape the
  * laos_memory_task dispatcher produces. Every production evidence ingress goes
@@ -25,7 +28,11 @@ function findCli(codeRoot) {
 
 // Exported so the env-publisher can invoke the Core CLI for the fd-rooted
 // vault.read task (S8/GP3-01) through the same restricted task interface.
-export function runCli(env, taskJson, codeRoot) {
+// GP7-04: the child is bounded (timeout + output cap) so a hung or chatty Core
+// child (e.g. a FIFO the O_NONBLOCK guard missed) cannot block the Bridge
+// forever or exhaust memory. runCli is also where the verified childEnv is
+// applied — the caller passes the frozen root, never a dynamic value.
+export function runCli(env, taskJson, codeRoot, options = {}) {
   return new Promise((resolve, reject) => {
     const cli = findCli(codeRoot);
     const args = [
@@ -34,6 +41,7 @@ export function runCli(env, taskJson, codeRoot) {
       "--state-dir", env.LAOS_STATE_DIR,
       "--task-json", taskJson,
     ];
+    const timeoutMs = options.timeoutMs ?? RUNCLI_TIMEOUT_MS;
     const child = spawn(env.LAOS_PYTHON_EXECUTABLE || "python3", args, {
       cwd: path.dirname(cli),
       env: { ...process.env, ...env, PYTHONUTF8: "1" },
@@ -42,16 +50,58 @@ export function runCli(env, taskJson, codeRoot) {
     });
     const stdout = [];
     const stderr = [];
-    child.stdout.on("data", (chunk) => stdout.push(chunk));
-    child.stderr.on("data", (chunk) => stderr.push(chunk));
-    child.once("error", (error) => reject(error));
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let timedOut = false;
+    let outputLimitExceeded = false;
+    let settled = false;
+    let timer;
+
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const collect = (target, chunk, isStdout) => {
+      // Always push so the pipe keeps draining (a blocked child would never
+      // emit more chunks and the cap would never trip). Track the byte count
+      // separately; once it exceeds the cap we kill and reject.
+      if (isStdout) stdoutBytes += chunk.length;
+      else stderrBytes += chunk.length;
+      if (stdoutBytes > RUNCLI_MAX_OUTPUT_BYTES || stderrBytes > RUNCLI_MAX_OUTPUT_BYTES) {
+        outputLimitExceeded = true;
+        child.kill("SIGKILL");
+      }
+      target.push(chunk);
+    };
+
+    child.stdout.on("data", (chunk) => collect(stdout, chunk, true));
+    child.stderr.on("data", (chunk) => collect(stderr, chunk, false));
+    child.once("error", (error) => finish(error));
     child.once("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(`LAOS CLI exited ${code}: ${Buffer.concat(stderr).toString("utf8").slice(0, 400)}`));
+      if (outputLimitExceeded) {
+        finish(new Error("LAOS CLI output limit exceeded"));
         return;
       }
-      resolve(Buffer.concat(stdout).toString("utf8"));
+      if (timedOut) {
+        finish(new Error("LAOS CLI timed out"));
+        return;
+      }
+      if (code !== 0) {
+        finish(new Error(`LAOS CLI exited ${code}: ${Buffer.concat(stderr).toString("utf8").slice(0, 400)}`));
+        return;
+      }
+      finish(null, Buffer.concat(stdout).toString("utf8"));
     });
+
+    timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
+    }, timeoutMs);
+    timer.unref();
   });
 }
 
