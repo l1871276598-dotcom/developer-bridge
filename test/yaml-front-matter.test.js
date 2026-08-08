@@ -143,3 +143,13 @@ test("GP6-02: rejects flow collections whose commas are inside quotes", () => {
   assert.throws(() => parseFrontMatterYaml('meta: {k: "a,b", n: 1}\n'), { name: "YamlError" });
   assert.throws(() => parseFrontMatterYaml('tags: ["a, b", "c d"]\n'), { name: "YamlError" });
 });
+
+test("GP7-05: rejects nested flow collections instead of silently mis-splitting", () => {
+  // Naive split(",") would turn [a, [b, c]] into ["a", "[b", "c]"] and
+  // {k: {a: 1}, n: 3} into {"k": "{a: 1", "b": "2}", "n": 3} — silent
+  // misparse that must fail closed.
+  assert.throws(() => parseFrontMatterYaml("tags: [a, [b, c]]\n"), { name: "YamlError" });
+  assert.throws(() => parseFrontMatterYaml("meta: {k: {a: 1, b: 2}, n: 3}\n"), { name: "YamlError" });
+  assert.throws(() => parseFrontMatterYaml("meta: {k: {a: 1,b: 2}, n: 3}\n"), { name: "YamlError" });
+  assert.throws(() => parseFrontMatterYaml("tags: [a, {k: v}, c]\n"), { name: "YamlError" });
+});

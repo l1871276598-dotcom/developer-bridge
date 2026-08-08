@@ -42,28 +42,42 @@ function safeKey(key, context) {
   return key;
 }
 
-// Fail-closed guard for the naive flow parser (GP6-02): a comma inside a quoted
-// item (single- or double-quoted, handling `''` and `\"` escapes) would be
-// silently mis-split by split(","). Detect it and reject rather than misparse.
-function hasCommaInsideQuotes(text) {
+// Fail-closed guard for the naive flow parser (GP6-02 + GP7-05). The parser
+// splits flow collections with split(","), which is only correct for flat,
+// unquoted items. Reject (rather than silently mis-split) when:
+//   - a comma sits inside a quoted item (GP6-02), or
+//   - the flow collection nests to depth > 1 (GP7-05): `[a, [b, c]]` or
+//     `{k: {a: 1}, n: 3}` would otherwise be cut on the inner commas.
+// inner is the content INSIDE the enclosing [..] / {..}, so it starts at
+// depth 1; any `[` or `{` pushes it to 2 = nested = unsupported.
+function rejectUnsupportedFlow(inner) {
   let inSingle = false;
   let inDouble = false;
-  for (let i = 0; i < text.length; i += 1) {
-    const c = text[i];
+  let depth = 1;
+  for (let i = 0; i < inner.length; i += 1) {
+    const c = inner[i];
     if (c === "'" && !inDouble) {
-      if (inSingle && text[i + 1] === "'") {
+      if (inSingle && inner[i + 1] === "'") {
         i += 1; // '' is an escaped single quote inside single quotes
         continue;
       }
       inSingle = !inSingle;
     } else if (c === '"' && !inSingle) {
-      if (inDouble && text[i - 1] === "\\") continue; // \" stays inside
+      if (inDouble && inner[i - 1] === "\\") continue; // \" stays inside
       inDouble = !inDouble;
-    } else if (c === "," && (inSingle || inDouble)) {
-      return true;
+    } else if (inSingle || inDouble) {
+      if (c === ",") {
+        throw new YamlError("commas inside quoted flow items are not supported");
+      }
+    } else if (c === "[" || c === "{") {
+      depth += 1;
+      if (depth > 1) {
+        throw new YamlError("nested flow collections are not supported");
+      }
+    } else if (c === "]" || c === "}") {
+      depth -= 1;
     }
   }
-  return false;
 }
 
 // Reject YAML merge key `<<` at any position of a mapping line.
@@ -108,18 +122,14 @@ function parseScalar(raw) {
   if (text.startsWith("[") && text.endsWith("]")) {
     const inner = text.slice(1, -1).trim();
     if (inner === "") return [];
-    if (hasCommaInsideQuotes(inner)) {
-      throw new YamlError("commas inside quoted flow-sequence items are not supported");
-    }
+    rejectUnsupportedFlow(inner);
     return inner.split(",").map((item) => parseScalar(item));
   }
   // Flow map {k: v, ...}
   if (text.startsWith("{") && text.endsWith("}")) {
     const inner = text.slice(1, -1).trim();
     if (inner === "") return {};
-    if (hasCommaInsideQuotes(inner)) {
-      throw new YamlError("commas inside quoted flow-map values are not supported");
-    }
+    rejectUnsupportedFlow(inner);
     // Object.create(null): __proto__/constructor keys must not land on a
     // prototype chain. Keys also go through safeKey so tags/anchors/complex
     // keys are rejected.
