@@ -86,9 +86,14 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
   // The evidence.publish forwarding uses the default runCli (resolving the CLI
   // under codeRoot and spawning env.LAOS_PYTHON_EXECUTABLE), the same fixed
   // runner shape as laos_memory_task. childEnv carries the frozen verified root.
-  const publish = async (evidenceInput) => {
+  // GP7-02: the codeRoot is resolved PER CALL — a workspace swap between
+  // construction and this request must not run Core from the stale workspace.
+  const publish = async (evidenceInput, effectiveCodeRoot) => {
     const { buildLaosEvidencePublisher } = await import("./laos-publisher.js");
-    const publisher = buildLaosEvidencePublisher({ env: childEnv, codeRoot });
+    const publisher = buildLaosEvidencePublisher({
+      env: childEnv,
+      codeRoot: effectiveCodeRoot,
+    });
     return publisher(evidenceInput);
   };
 
@@ -96,13 +101,13 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
   // runner invokes the Core CLI restricted task interface. GP4-01: the caller
   // (and the Bridge) never supply vault_root — Core derives it from its own
   // administrator config (LAOS_VAULT_ROOT). The task carries only relative_path.
-  const vaultRead = async (relativePath) => {
+  const vaultRead = async (relativePath, effectiveCodeRoot) => {
     const { runCli } = await import("./laos-publisher.js");
     const task = {
       type: "vault.read",
       input: { relative_path: relativePath },
     };
-    const stdout = await runCli(childEnv, JSON.stringify(task), codeRoot);
+    const stdout = await runCli(childEnv, JSON.stringify(task), effectiveCodeRoot);
     let parsed;
     try {
       parsed = JSON.parse(stdout);
@@ -125,7 +130,11 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
     return content;
   };
 
-  return async (input) => {
+  // GP7-02: codeRoot is resolved per request by the dispatcher (the currently
+  // validated authorized workspace), so a workspace swap can never run Core
+  // from a stale captured root. The construction-time codeRoot is only a
+  // fallback for direct non-dispatcher callers.
+  return async (input, effectiveCodeRoot) => {
     // input is { relative_path } — the only caller-supplied field (Phase 1).
     if (!input || typeof input !== "object" || typeof input.relative_path !== "string") {
       const error = new Error("vault snapshot requires relative_path");
@@ -133,13 +142,14 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
       throw error;
     }
     const noteRelativePath = input.relative_path;
+    const runCodeRoot = effectiveCodeRoot ?? codeRoot;
 
     // fd-rooted vault read via Core (S8/GP3-01): the returned bytes are the
     // note content as read from the fd chain rooted at the trusted vault root.
     // The relative path Core validated is the same reject-all string, so the
     // read object, partition, and identity describe the same canonical note
     // (GP2-02).
-    const raw = await vaultRead(noteRelativePath);
+    const raw = await vaultRead(noteRelativePath, runCodeRoot);
     const partition = resolvePartition(map, noteRelativePath);
     const confirmed = verifyScope(partition, profile);
     const { identity, input: snapshotInput } = buildCanonicalNoteSnapshot(raw, noteRelativePath, partition);
@@ -150,7 +160,7 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
       project: confirmed.project,
       confidentiality: confirmed.confidentiality,
     };
-    const coreResult = await publish(evidenceInput);
+    const coreResult = await publish(evidenceInput, runCodeRoot);
     return {
       canonical_identity: identity.canonical_identity,
       note_id: identity.note_id,

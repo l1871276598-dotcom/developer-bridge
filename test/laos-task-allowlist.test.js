@@ -98,6 +98,10 @@ test("ALLOWED_LAOS_TASKS equals the frozen allowlist exactly, no more and no les
   assert.deepEqual([...ALLOWED_LAOS_TASKS].sort(), [...EXPECTED_FROZEN_TASKS].sort());
   assert.equal(ALLOWED_LAOS_TASKS.has("memory.review"), false);
   assert.equal(ALLOWED_LAOS_TASKS.has("memory.activate"), false);
+  // GP7-01: vault.read (raw vault read, no partition/scope) and evidence.publish
+  // (synthetic evidence minting) must never be externally dispatchable.
+  assert.equal(ALLOWED_LAOS_TASKS.has("vault.read"), false);
+  assert.equal(ALLOWED_LAOS_TASKS.has("evidence.publish"), false);
 });
 
 test("FROZEN_LAOS_TASKS and EXPECTED_FROZEN_TASKS are identical frozen lists", () => {
@@ -118,7 +122,17 @@ test("exported laos_memory_task schema enum matches the frozen allowlist exactly
   assert.equal(enumVals.includes("memory.activate"), false);
 });
 
-for (const forbidden of ["memory.review", "memory.activate", "unknown.task", "import.file"]) {
+for (const forbidden of [
+  "memory.review",
+  "memory.activate",
+  "unknown.task",
+  "import.file",
+  // GP7-01: vault.read and evidence.publish must NOT be externally reachable —
+  // otherwise the partition→verifyScope→evidence.publish chain could be
+  // bypassed to read the vault directly, or synthetic evidence published.
+  "vault.read",
+  "evidence.publish",
+]) {
   test(`rejects ${forbidden} at the Bridge boundary with operation_not_allowed and zero downstream calls`, async (t) => {
     const item = await fixture(t);
     const { bridge, spy } = await createBridgeWithSpy(item);

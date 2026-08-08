@@ -528,10 +528,14 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
         // artifact. The caller supplies only relative_path; the adapter reads
         // the Vault, derives identity, resolves the partition, and publishes
         // through Core. Without a configured adapter this fails closed.
+        // GP7-02: the CURRENT codeRoot (validated this call, after the
+        // canonicalDirectory + requireSeparatedRoots + resolveCli checks above)
+        // is bound into the publisher, so a workspace swap can never run Core
+        // from a stale captured root.
         if (!vaultPublish) {
           fail("vault_unavailable", { message: "Vault evidence publishing is not configured" });
         }
-        const payload = await vaultPublish(input);
+        const payload = await vaultPublish(input, codeRoot);
         return {
           text: JSON.stringify(redact(payload, [
             [codeRoot, "[workspace]"],
