@@ -42,6 +42,30 @@ function safeKey(key, context) {
   return key;
 }
 
+// Fail-closed guard for the naive flow parser (GP6-02): a comma inside a quoted
+// item (single- or double-quoted, handling `''` and `\"` escapes) would be
+// silently mis-split by split(","). Detect it and reject rather than misparse.
+function hasCommaInsideQuotes(text) {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (c === "'" && !inDouble) {
+      if (inSingle && text[i + 1] === "'") {
+        i += 1; // '' is an escaped single quote inside single quotes
+        continue;
+      }
+      inSingle = !inSingle;
+    } else if (c === '"' && !inSingle) {
+      if (inDouble && text[i - 1] === "\\") continue; // \" stays inside
+      inDouble = !inDouble;
+    } else if (c === "," && (inSingle || inDouble)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Reject YAML merge key `<<` at any position of a mapping line.
 function rejectMergeKey(text) {
   if (text.startsWith("<<") && (text.length === 2 || /^<<[\s:]/.test(text))) {
@@ -84,12 +108,18 @@ function parseScalar(raw) {
   if (text.startsWith("[") && text.endsWith("]")) {
     const inner = text.slice(1, -1).trim();
     if (inner === "") return [];
+    if (hasCommaInsideQuotes(inner)) {
+      throw new YamlError("commas inside quoted flow-sequence items are not supported");
+    }
     return inner.split(",").map((item) => parseScalar(item));
   }
   // Flow map {k: v, ...}
   if (text.startsWith("{") && text.endsWith("}")) {
     const inner = text.slice(1, -1).trim();
     if (inner === "") return {};
+    if (hasCommaInsideQuotes(inner)) {
+      throw new YamlError("commas inside quoted flow-map values are not supported");
+    }
     // Object.create(null): __proto__/constructor keys must not land on a
     // prototype chain. Keys also go through safeKey so tags/anchors/complex
     // keys are rejected.
@@ -121,10 +151,13 @@ export function parseFrontMatterYaml(text) {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     if (line.trim() === "" || line.trim().startsWith("#")) continue;
-    // YAML forbids tab for indentation (R11): a tab at any indentation position
-    // is ambiguous and must fail closed rather than be silently re-indented.
-    if (line.startsWith("\t")) {
-      throw new YamlError("tab-indented lines are not supported");
+    // GP6-02: YAML forbids tab for indentation anywhere in the leading
+    // whitespace. A tab at column 0 OR after spaces (`  \tchild`) is ambiguous
+    // and must fail closed — checking only column 0 let `  \tchild` be
+    // re-indented and accepted as a nested key.
+    const leading = /^[ \t]*/u.exec(line)?.[0] ?? "";
+    if (leading.includes("\t")) {
+      throw new YamlError("tab indentation is not supported");
     }
     const indentMatch = INDENT_RE.exec(line);
     const indent = indentMatch[1].length;

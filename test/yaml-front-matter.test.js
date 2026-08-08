@@ -127,3 +127,19 @@ test("F-06: rejects custom tags", () => {
 test("F-06: rejects keys that are not safe plain scalars", () => {
   assert.throws(() => parseFrontMatterYaml(`[a]: 1\n`), { name: "YamlError" });
 });
+
+test("GP6-02: rejects a nested key indented with spaces+tab (R11 bypass)", () => {
+  // Leading spaces before the tab meant col-0-only tab checks let this through;
+  // a tab anywhere in the leading whitespace is ambiguous and must fail closed.
+  assert.throws(() => parseFrontMatterYaml("parent:\n \tchild: x\n"), { name: "YamlError" });
+  assert.throws(() => parseFrontMatterYaml("parent:\n   \tchild: x\n"), { name: "YamlError" });
+});
+
+test("GP6-02: rejects flow collections whose commas are inside quotes", () => {
+  // Naive split(",") would turn ["a,b","c"] into ["a","b","c"] — a silent
+  // misparse that must fail closed rather than drop quote boundaries.
+  assert.throws(() => parseFrontMatterYaml('tags: ["a,b","c"]\n'), { name: "YamlError" });
+  assert.throws(() => parseFrontMatterYaml("tags: ['a,b','c']\n"), { name: "YamlError" });
+  assert.throws(() => parseFrontMatterYaml('meta: {k: "a,b", n: 1}\n'), { name: "YamlError" });
+  assert.throws(() => parseFrontMatterYaml('tags: ["a, b", "c d"]\n'), { name: "YamlError" });
+});
