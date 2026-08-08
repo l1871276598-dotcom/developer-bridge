@@ -48,7 +48,17 @@ function sha256(value) {
 
 async function coreSetup(t) {
   const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "bridge-e2e-")));
-  const workspace = CORE_ROOT;
+  // GP8-01: the writable workspace is a data/project context, separate from the
+  // immutable Core runtime (CORE_ROOT). Core executes only from CORE_ROOT.
+  const workspace = path.join(base, "workspace");
+  await mkdir(workspace, { recursive: true });
+  await execFileAsync("git", ["init", "--quiet", "-b", "feat/e2e-workspace"], { cwd: workspace });
+  await execFileAsync("git", ["config", "user.name", "Test User"], { cwd: workspace });
+  await execFileAsync("git", ["config", "user.email", "test@example.invalid"], { cwd: workspace });
+  await writeFile(path.join(workspace, "context.txt"), "e2e data context\n", "utf8");
+  await execFileAsync("git", ["add", "context.txt"], { cwd: workspace });
+  await execFileAsync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: workspace });
+  const coreRoot = CORE_ROOT;
   const vault = path.join(base, "vault");
   const dataRoot = path.join(base, "data");
   const stateDir = path.join(base, "state");
@@ -75,7 +85,7 @@ memory.init_store(Path(${JSON.stringify(dataRoot)}))
 memory.db_init(argparse.Namespace(root=${JSON.stringify(dataRoot)}, state_dir=${JSON.stringify(stateDir)}))
 `], { env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } });
   t.after(() => rm(base, { recursive: true, force: true }));
-  return { base, workspace, vault, dataRoot, stateDir };
+  return { base, workspace, coreRoot, vault, dataRoot, stateDir };
 }
 
 function env(setup) {
@@ -83,6 +93,8 @@ function env(setup) {
     ...process.env,
     PYTHONUTF8: "1",
     PYTHONDONTWRITEBYTECODE: "1",
+    // GP8-01: Core runs from the immutable runtime root.
+    LAOS_CORE_ROOT: setup.coreRoot,
     LAOS_DATA_ROOT: setup.dataRoot,
     LAOS_STATE_DIR: setup.stateDir,
     LAOS_PYTHON_EXECUTABLE: PYTHON,
@@ -352,6 +364,28 @@ test("E20b: allowlist does not expose memory.review/memory.activate at runtime",
   assert.equal(enumVals.includes("memory.activate"), false);
   assert.equal(enumVals.includes("evidence.publish"), false, "evidence.publish must not be external");
   assert.equal(enumVals.includes("vault.snapshot.publish"), true, "vault.snapshot.publish must be exposed");
+});
+
+// GP8-01: Core executes ONLY from the immutable LAOS_CORE_ROOT runtime. The
+// Agent-writable workspace is a data context; malicious code planted there must
+// never run during task dispatch. Here we plant an evil laos.py AND an evil
+// memory.py in the workspace and prove Core still runs the real CORE_ROOT code.
+test("GP8-01: malicious code in the writable workspace never executes during Core dispatch", async (t) => {
+  const setup = await coreSetup(t);
+  // Plant attacker code in the writable workspace (as if the Agent modified it).
+  await mkdir(path.join(setup.workspace, "src"), { recursive: true });
+  await writeFile(path.join(setup.workspace, "src", "laos.py"),
+    'raise SystemExit("evil workspace laos.py executed")\n', "utf8");
+  await writeFile(path.join(setup.workspace, "src", "memory.py"),
+    'raise SystemExit("evil workspace memory.py imported")\n', "utf8");
+
+  const { bridge } = await createTrueBridge(setup);
+  // vault.snapshot.publish drives Core vault.read + evidence.publish — if the
+  // workspace code were executed, this would raise the evil SystemExit. It must
+  // instead run CORE_ROOT and publish normally.
+  const payload = await publish(bridge, "01-Projects/LAOS/design.md");
+  assert.equal(typeof payload.source_ref, "string");
+  assert.ok(payload.source_ref.length > 0, "real Core evidence was minted");
 });
 
 // GP3-01 (Round 4): the vault read is fd-rooted in Core (Python dir_fd +

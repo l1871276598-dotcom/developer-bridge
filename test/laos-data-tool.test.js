@@ -18,19 +18,21 @@ async function git(cwd, ...args) {
 async function fixture(t) {
   const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "developer-bridge-laos-data-")));
   const workspace = path.join(base, "workspace");
+  const coreRoot = path.join(base, "core-runtime");
   const dataRoot = path.join(base, "data");
   const stateDir = path.join(base, "state");
-  await Promise.all([mkdir(workspace), mkdir(dataRoot), mkdir(stateDir)]);
+  await Promise.all([mkdir(workspace), mkdir(coreRoot), mkdir(dataRoot), mkdir(stateDir)]);
   await writeFile(path.join(dataRoot, ".research-agent-root"), "{}\n", "utf8");
-  await mkdir(path.join(workspace, "src"));
-  await writeFile(path.join(workspace, "src", "laos.py"), "print('fixture')\n", "utf8");
+  await mkdir(path.join(coreRoot, "src"));
+  await writeFile(path.join(coreRoot, "src", "laos.py"), "print('fixture')\n", "utf8");
   await git(workspace, "init", "--quiet", "-b", "feat/laos-data");
   await git(workspace, "config", "user.name", "Test User");
   await git(workspace, "config", "user.email", "test@example.invalid");
-  await git(workspace, "add", "src/laos.py");
+  await writeFile(path.join(workspace, "context.txt"), "fixture\n", "utf8");
+  await git(workspace, "add", "context.txt");
   await git(workspace, "commit", "--quiet", "-m", "fixture");
   t.after(() => rm(base, { recursive: true, force: true }));
-  return { workspace, dataRoot, stateDir };
+  return { workspace, coreRoot, dataRoot, stateDir };
 }
 
 function env(fixture, overrides = {}) {
@@ -38,6 +40,7 @@ function env(fixture, overrides = {}) {
     PATH: process.env.PATH,
     HOME: process.env.HOME,
     DEVELOPER_BRIDGE_CAPABILITY_PROFILE: "controlled-engineering-v1",
+    LAOS_CORE_ROOT: fixture.coreRoot,
     LAOS_DATA_ROOT: fixture.dataRoot,
     LAOS_STATE_DIR: fixture.stateDir,
     // Trusted Bridge profile scope (C-INV-13). LAOS tasks are fail-closed
@@ -88,9 +91,9 @@ test("conditionally exposes one LAOS memory task bound to external data and stat
   assert.deepEqual(JSON.parse(result.content[0].text), { ok: true, data_root: "[laos-data]" });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, process.platform === "win32" ? "python" : "python3");
-  assert.equal(calls[0].options.cwd, item.workspace);
+  assert.equal(calls[0].options.cwd, item.coreRoot);
   assert.deepEqual(calls[0].args.slice(0, 5), [
-    path.join(item.workspace, "src", "laos.py"),
+    path.join(item.coreRoot, "src", "laos.py"),
     "--root",
     item.dataRoot,
     "--state-dir",
@@ -163,7 +166,7 @@ test("allows handoff.write LAOS tasks through the fixed CLI", async (t) => {
 
 test("runs the fixed LAOS CLI as a real subprocess against external roots", async (t) => {
   const item = await fixture(t);
-  await writeFile(path.join(item.workspace, "src", "laos.py"), `
+  await writeFile(path.join(item.coreRoot, "src", "laos.py"), `
 import argparse
 import json
 from pathlib import Path
@@ -280,14 +283,14 @@ test("rejects overlapping LAOS data and state directories", async (t) => {
 
 test("rejects an authorized workspace without the fixed LAOS CLI before publishing tools", async (t) => {
   const item = await fixture(t);
-  await unlink(path.join(item.workspace, "src", "laos.py"));
+  await unlink(path.join(item.coreRoot, "src", "laos.py"));
 
   await assert.rejects(
     createBridgeWithSyncTools(item.workspace, () => {}, {
       operatorIdentity,
       env: env(item),
     }),
-    /authorized workspace does not contain a safe LAOS CLI/u,
+    /Core runtime does not contain a safe laos.py/u,
   );
 });
 

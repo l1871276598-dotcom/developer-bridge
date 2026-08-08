@@ -23,19 +23,21 @@ async function git(cwd, ...args) {
 async function fixture(t) {
   const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "laos-constitution-scope-")));
   const workspace = path.join(base, "workspace");
+  const coreRoot = path.join(base, "core-runtime");
   const dataRoot = path.join(base, "data");
   const stateDir = path.join(base, "state");
-  await Promise.all([mkdir(workspace), mkdir(dataRoot), mkdir(stateDir)]);
+  await Promise.all([mkdir(workspace), mkdir(coreRoot), mkdir(dataRoot), mkdir(stateDir)]);
   await writeFile(path.join(dataRoot, ".research-agent-root"), "{}\n", "utf8");
-  await mkdir(path.join(workspace, "src"));
-  await writeFile(path.join(workspace, "src", "laos.py"), "print('fixture')\n", "utf8");
+  await mkdir(path.join(coreRoot, "src"));
+  await writeFile(path.join(coreRoot, "src", "laos.py"), "print('fixture')\n", "utf8");
   await git(workspace, "init", "--quiet", "-b", "feat/constitution-scope");
   await git(workspace, "config", "user.name", "Test");
   await git(workspace, "config", "user.email", "t@invalid.example");
-  await git(workspace, "add", "src/laos.py");
+  await writeFile(path.join(workspace, "context.txt"), "fixture\n", "utf8");
+  await git(workspace, "add", "context.txt");
   await git(workspace, "commit", "--quiet", "-m", "fixture");
   t.after(() => rm(base, { recursive: true, force: true }));
-  return { workspace, dataRoot, stateDir };
+  return { workspace, coreRoot, dataRoot, stateDir };
 }
 
 async function createBridge(item) {
@@ -45,6 +47,7 @@ async function createBridge(item) {
     env: {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
+      LAOS_CORE_ROOT: item.coreRoot,
       LAOS_DATA_ROOT: item.dataRoot,
       LAOS_STATE_DIR: item.stateDir,
       LAOS_CHECKPOINT_WORKSPACE: PROFILE.workspace,
@@ -91,6 +94,7 @@ test("C-INV-13: same-scope caller values are normalized to the trusted profile",
     env: {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
+      LAOS_CORE_ROOT: item.coreRoot,
       LAOS_DATA_ROOT: item.dataRoot,
       LAOS_STATE_DIR: item.stateDir,
       LAOS_CHECKPOINT_WORKSPACE: PROFILE.workspace,
@@ -124,6 +128,7 @@ test("C-INV-13: scope-bearing task with omitted scope is injected from the profi
     env: {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
+      LAOS_CORE_ROOT: item.coreRoot,
       LAOS_DATA_ROOT: item.dataRoot,
       LAOS_STATE_DIR: item.stateDir,
       LAOS_CHECKPOINT_WORKSPACE: PROFILE.workspace,
@@ -152,6 +157,7 @@ test("C-INV-13: fail-closed when the Bridge profile is absent", async (t) => {
     env: {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
+      LAOS_CORE_ROOT: item.coreRoot,
       LAOS_DATA_ROOT: item.dataRoot,
       LAOS_STATE_DIR: item.stateDir,
       // No LAOS_CHECKPOINT_WORKSPACE → no trusted scope.

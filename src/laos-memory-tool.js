@@ -119,11 +119,11 @@ async function resolveCli(codeRoot) {
   const cli = path.join(codeRoot, "src", "laos.py");
   const lexicalStat = await lstat(cli).catch(() => null);
   if (!lexicalStat?.isFile() || lexicalStat.isSymbolicLink() || lexicalStat.nlink !== 1) {
-    throw new Error("The authorized workspace does not contain a safe LAOS CLI");
+    throw new Error("The LAOS Core runtime does not contain a safe laos.py");
   }
   const canonical = await realpath(cli);
   if (!isContained(codeRoot, canonical) || canonical !== cli) {
-    throw new Error("The LAOS CLI escapes the authorized workspace");
+    throw new Error("The LAOS Core runtime escapes its root");
   }
   return cli;
 }
@@ -494,14 +494,35 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
   }
   if (typeof getCodeRoot !== "function") throw new Error("LAOS code root resolver is required");
 
+  // GP8-01: the Core TCB is executed from an IMMUTABLE runtime directory
+  // (LAOS_CORE_ROOT) that is separate from the Agent-writable workspace. The
+  // workspace is only a data/project context. If the Agent can modify files
+  // under the writable workspace, it must never be able to modify the Python
+  // modules Bridge imports/executes (laos.py, memory, evidence, review,
+  // AuthorityStore, ReviewGate, ...). Executing Core from the writable
+  // workspace would let a modified import-time module run before task
+  // dispatch — an authority bypass under the allowlist. LAOS_CORE_ROOT must be
+  // a real directory, nlink==1 (no hard-link alias), and separated from all
+  // other roots.
+  const coreRootConfigured = typeof env.LAOS_CORE_ROOT === "string" && env.LAOS_CORE_ROOT.length > 0;
+  if (!coreRootConfigured) {
+    throw new Error("LAOS_CORE_ROOT must be set to an immutable Core runtime directory");
+  }
+  const coreRoot = await canonicalDirectory(env.LAOS_CORE_ROOT, "LAOS Core runtime");
   const dataRoot = await canonicalDirectory(env.LAOS_DATA_ROOT, "LAOS_DATA_ROOT");
   const stateDir = await canonicalDirectory(env.LAOS_STATE_DIR, "LAOS_STATE_DIR");
   await requireDataRoot(dataRoot);
   if (overlaps(dataRoot, stateDir)) throw new Error("LAOS data and state directories must not overlap");
   const runtimeRoot = await canonicalDirectory(path.resolve(import.meta.dirname, ".."), "Developer Bridge runtime");
   const initialCodeRoot = await canonicalDirectory(getCodeRoot(), "Authorized workspace");
+  // Core TCB is separate from the writable workspace AND from the Bridge
+  // runtime/data/state.
+  requireSeparatedRoots(runtimeRoot, coreRoot, dataRoot, stateDir);
   requireSeparatedRoots(runtimeRoot, initialCodeRoot, dataRoot, stateDir);
-  await resolveCli(initialCodeRoot);
+  if (overlaps(coreRoot, initialCodeRoot)) {
+    throw new Error("LAOS Core runtime must be separate from the writable workspace");
+  }
+  await resolveCli(coreRoot);
   const runner = options.runCommand || runFixed;
 
   // Vault-owned evidence publisher (GP-01): injected by the host, or built
@@ -512,7 +533,7 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
   let vaultPublish = options.vaultPublish;
   if (!vaultPublish) {
     const { buildEnvVaultPublisher } = await import("./vault/env-publisher.js");
-    vaultPublish = await buildEnvVaultPublisher(env, { codeRoot: initialCodeRoot, runner });
+    vaultPublish = await buildEnvVaultPublisher(env, { codeRoot: coreRoot, runner });
   }
 
   return Object.freeze({
@@ -521,21 +542,24 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
       const { encoded: taskJson, expectedIdentity, type, input } = normalizeTask(args, env);
       const codeRoot = await canonicalDirectory(getCodeRoot(), "Authorized workspace");
       requireSeparatedRoots(runtimeRoot, codeRoot, dataRoot, stateDir);
-      const cli = await resolveCli(codeRoot);
+      // Core always runs from the immutable runtime root; the writable
+      // workspace is never an execution source (GP8-01).
+      if (overlaps(coreRoot, codeRoot)) {
+        throw new Error("LAOS Core runtime must be separate from the writable workspace");
+      }
+      const cli = await resolveCli(coreRoot);
 
       if (type === "vault.snapshot.publish") {
         // GP-01: only the Bridge-owned Vault adapter may mint a vault evidence
         // artifact. The caller supplies only relative_path; the adapter reads
         // the Vault, derives identity, resolves the partition, and publishes
         // through Core. Without a configured adapter this fails closed.
-        // GP7-02: the CURRENT codeRoot (validated this call, after the
-        // canonicalDirectory + requireSeparatedRoots + resolveCli checks above)
-        // is bound into the publisher, so a workspace swap can never run Core
-        // from a stale captured root.
+        // GP7-02 + GP8-01: the publisher always runs Core from the immutable
+        // coreRoot (never the writable workspace).
         if (!vaultPublish) {
           fail("vault_unavailable", { message: "Vault evidence publishing is not configured" });
         }
-        const payload = await vaultPublish(input, codeRoot);
+        const payload = await vaultPublish(input, coreRoot);
         return {
           text: JSON.stringify(redact(payload, [
             [codeRoot, "[workspace]"],
@@ -548,7 +572,7 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
       const result = await runner(
         process.platform === "win32" ? "python" : "python3",
         [cli, "--root", dataRoot, "--state-dir", stateDir, "--task-json", taskJson],
-        { cwd: codeRoot, env: safeEnvironment(env), timeoutMs: TIMEOUT_MS },
+        { cwd: coreRoot, env: safeEnvironment(env), timeoutMs: TIMEOUT_MS },
       );
       if (result?.timedOut === true) fail("laos_task_timeout");
       if (result?.outputLimitExceeded === true) fail("laos_output_limit_exceeded");

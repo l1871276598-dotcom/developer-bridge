@@ -19,29 +19,34 @@ async function fixture(t) {
   const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "bridge-gp07-")));
   const workspaceA = path.join(base, "workspaceA");
   const workspaceB = path.join(base, "workspaceB");
+  const coreRoot = path.join(base, "core-runtime");
   const dataRoot = path.join(base, "data");
   const stateDir = path.join(base, "state");
   await Promise.all([
-    mkdir(workspaceA), mkdir(workspaceB), mkdir(dataRoot), mkdir(stateDir),
+    mkdir(workspaceA), mkdir(workspaceB), mkdir(coreRoot), mkdir(dataRoot), mkdir(stateDir),
   ]);
   await writeFile(path.join(dataRoot, ".research-agent-root"), "{}\n", "utf8");
+  // The immutable Core runtime holds laos.py; the writable workspaces hold only
+  // data context (no laos.py — Core never executes from them, GP8-01).
+  await mkdir(path.join(coreRoot, "src"));
+  await writeFile(path.join(coreRoot, "src", "laos.py"), "print('core')\n", "utf8");
   for (const ws of [workspaceA, workspaceB]) {
-    await mkdir(path.join(ws, "src"));
-    await writeFile(path.join(ws, "src", "laos.py"), `print('${path.basename(ws)}')\n`, "utf8");
     await git(ws, "init", "--quiet", "-b", "main");
     await git(ws, "config", "user.name", "Test User");
     await git(ws, "config", "user.email", "test@example.invalid");
-    await git(ws, "add", "src/laos.py");
+    await writeFile(path.join(ws, "context.txt"), path.basename(ws), "utf8");
+    await git(ws, "add", "context.txt");
     await git(ws, "commit", "--quiet", "-m", "fixture");
   }
   t.after(() => rm(base, { recursive: true, force: true }));
-  return { workspaceA, workspaceB, dataRoot, stateDir };
+  return { workspaceA, workspaceB, coreRoot, dataRoot, stateDir };
 }
 
 function env(item) {
   return {
     PATH: process.env.PATH,
     HOME: process.env.HOME,
+    LAOS_CORE_ROOT: item.coreRoot,
     LAOS_DATA_ROOT: item.dataRoot,
     LAOS_STATE_DIR: item.stateDir,
     LAOS_CHECKPOINT_WORKSPACE: "personal",
@@ -50,10 +55,10 @@ function env(item) {
   };
 }
 
-// GP7-02: the vault publisher must run Core from the CURRENT authorized
-// workspace (re-validated per call), never from a stale root captured at
-// construction. A workspace swap between calls must change where Core runs.
-test("GP7-02: vault.snapshot.publish uses the current codeRoot, not the construction-time root", async (t) => {
+// GP8-01: Core always executes from the IMMUTABLE LAOS_CORE_ROOT runtime, never
+// from the Agent-writable workspace. A workspace swap (A→B) must not change
+// where Core runs — the mutable workspace is only a data/project context.
+test("GP8-01: Core runs from the immutable coreRoot, never the writable workspace", async (t) => {
   const item = await fixture(t);
   let activeRoot = item.workspaceA;
   const receivedRoots = [];
@@ -76,23 +81,22 @@ test("GP7-02: vault.snapshot.publish uses the current codeRoot, not the construc
   const tool = await createLaosMemoryTool(env(item), () => activeRoot, { vaultPublish });
   assert.ok(tool, "tool should be constructed");
 
-  // Call 1: active workspace is A.
+  // Call 1: publisher receives the immutable coreRoot, NOT workspace A.
   await tool.call({
     task: { type: "vault.snapshot.publish", workspace: "personal", input: { relative_path: "P/t.md" } },
   });
   assert.equal(publishCalls, 1);
-  assert.equal(receivedRoots[0], item.workspaceA, "first call runs from workspace A");
+  assert.equal(receivedRoots[0], item.coreRoot, "Core runs from the immutable runtime root");
 
-  // Swap the authorized workspace to B.
+  // Swap the authorized workspace to B — Core execution must NOT move.
   activeRoot = item.workspaceB;
 
-  // Call 2: publisher must run from the CURRENT workspace B, not captured A.
   await tool.call({
     task: { type: "vault.snapshot.publish", workspace: "personal", input: { relative_path: "P/t.md" } },
   });
   assert.equal(publishCalls, 2);
-  assert.equal(receivedRoots[1], item.workspaceB, "second call runs from the swapped workspace B");
-  assert.notEqual(receivedRoots[1], item.workspaceA, "must not use the stale construction-time root");
+  assert.equal(receivedRoots[1], item.coreRoot, "Core still runs from the immutable runtime root");
+  assert.equal(receivedRoots[1], receivedRoots[0], "workspace swap never changes Core execution root");
 });
 
 // GP7-04: runCli is a bounded spawn — a hung Core child is killed via the
@@ -135,10 +139,10 @@ test("GP7-04: runCli kills a chatty Core child (output cap, no unbounded bufferi
   const env = { LAOS_DATA_ROOT: "/tmp", LAOS_STATE_DIR: "/tmp", LAOS_PYTHON_EXECUTABLE: fake };
   await assert.rejects(runCli(env, "{}", ws), /output limit exceeded/i);
 });
-test("GP7-02: a workspace swap to a dir without a safe CLI fails closed before the publisher runs", async (t) => {
+test("GP8-01: a workspace swap to a non-directory fails closed before the publisher runs", async (t) => {
   const item = await fixture(t);
-  const broken = path.join(item.workspaceA, "..", "noclone");
-  await mkdir(broken, { recursive: true });
+  const broken = path.join(item.workspaceA, "..", "not-a-dir");
+  await writeFile(broken, "file", "utf8");
   let activeRoot = item.workspaceA;
   let publishCalls = 0;
   const vaultPublish = async () => {
@@ -153,7 +157,7 @@ test("GP7-02: a workspace swap to a dir without a safe CLI fails closed before t
     tool.call({
       task: { type: "vault.snapshot.publish", workspace: "personal", input: { relative_path: "P/t.md" } },
     }),
-    /Authorized workspace|safe LAOS CLI|real directory/,
+    /Authorized workspace|real directory|not a directory/,
   );
-  assert.equal(publishCalls, 0, "publisher must not be reached when the current root is invalid");
+  assert.equal(publishCalls, 0, "publisher must not be reached when the current workspace is invalid");
 });

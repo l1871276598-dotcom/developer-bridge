@@ -14,14 +14,11 @@ const RUNCLI_MAX_OUTPUT_BYTES = 1024 * 1024;
  * Bridge policy boundary (C-INV-16).
  */
 
-function findCodeRoot() {
-  const workspace = process.env.DEVELOPER_BRIDGE_WORKSPACE;
-  if (!workspace) throw new Error("DEVELOPER_BRIDGE_WORKSPACE is not set");
-  return workspace;
-}
-
 function findCli(codeRoot) {
-  const resolved = codeRoot ?? findCodeRoot();
+  // GP8-01: Core runs from the immutable LAOS_CORE_ROOT runtime, never from a
+  // caller-derived path. The codeRoot argument is the validated runtime root.
+  const resolved = codeRoot ?? process.env.LAOS_CORE_ROOT;
+  if (!resolved) throw new Error("LAOS_CORE_ROOT is not set");
   const cli = path.join(resolved, "src", "laos.py");
   return cli;
 }

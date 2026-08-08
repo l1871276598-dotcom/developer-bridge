@@ -9,8 +9,8 @@ import { promisify } from "node:util";
 import { createBridgeWithSyncTools } from "../src/bridge-with-sync-tools.js";
 
 const execFileAsync = promisify(execFile);
+const git = (cwd, ...args) => execFileAsync("git", args, { cwd });
 const operatorIdentity = Object.freeze({ id: "laos.s15.test", type: "local-human" });
-const CORE_ROOT = "/Users/user/projects/laos-ws/gpt";
 const PYTHON = process.env.LAOS_PYTHON_EXECUTABLE || "python3.11";
 
 const PROFILE = Object.freeze({
@@ -28,14 +28,29 @@ const PROFILE = Object.freeze({
 
 async function coreSetup(t) {
   const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "s15-trap-")));
+  const workspace = path.join(base, "workspace");
+  const coreRoot = path.join(base, "core-runtime");
   const vault = path.join(base, "vault");
   const dataRoot = path.join(base, "data");
   const stateDir = path.join(base, "state");
   await Promise.all([
+    mkdir(workspace, { recursive: true }),
+    mkdir(path.join(coreRoot, "src"), { recursive: true }),
     mkdir(path.join(vault, "01-Projects", "LAOS"), { recursive: true }),
     mkdir(dataRoot, { recursive: true }),
     mkdir(stateDir, { recursive: true }),
   ]);
+  await writeFile(path.join(dataRoot, ".research-agent-root"), "{}\n", "utf8");
+  await writeFile(path.join(coreRoot, "src", "laos.py"), "print('fixture')\n", "utf8");
+  // The Bridge workspace is a plain data context (a git repo with no laos.py —
+  // GP8-01: Core never executes from it). The immutable Core runtime is
+  // separate and holds laos.py.
+  await git(workspace, "init", "--quiet", "-b", "feat/s15-ws");
+  await git(workspace, "config", "user.name", "Test");
+  await git(workspace, "config", "user.email", "t@invalid.example");
+  await writeFile(path.join(workspace, "context.txt"), "workspace\n", "utf8");
+  await git(workspace, "add", "context.txt");
+  await git(workspace, "commit", "--quiet", "-m", "fixture");
   await writeFile(path.join(base, "vault-config.json"), JSON.stringify({
     vault: { root: vault },
     partition_rules: [
@@ -43,16 +58,8 @@ async function coreSetup(t) {
     ],
   }));
   await writeFile(path.join(vault, "01-Projects", "LAOS", "design.md"), "---\nid: s15-note\ntitle: S15\n---\n\nbody\n");
-  await execFileAsync(PYTHON, ["-c", `
-import sys
-sys.path.insert(0, ${JSON.stringify(path.join(CORE_ROOT, "src"))})
-import memory, argparse
-from pathlib import Path
-memory.init_store(Path(${JSON.stringify(dataRoot)}))
-memory.db_init(argparse.Namespace(root=${JSON.stringify(dataRoot)}, state_dir=${JSON.stringify(stateDir)}))
-`], { env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } });
   t.after(() => rm(base, { recursive: true, force: true }));
-  return { base, vault, dataRoot, stateDir };
+  return { base, workspace, coreRoot, vault, dataRoot, stateDir };
 }
 
 function env(setup) {
@@ -60,6 +67,7 @@ function env(setup) {
     ...process.env,
     PYTHONUTF8: "1",
     PYTHONDONTWRITEBYTECODE: "1",
+    LAOS_CORE_ROOT: setup.coreRoot,
     LAOS_DATA_ROOT: setup.dataRoot,
     LAOS_STATE_DIR: setup.stateDir,
     LAOS_PYTHON_EXECUTABLE: PYTHON,
@@ -75,7 +83,7 @@ function env(setup) {
 // memory.review / memory.activate by throwing AUTHORITY_BOUNDARY_BREACH.
 async function createTrappedBridge(setup) {
   const trapHit = [];
-  const bridge = await createBridgeWithSyncTools(CORE_ROOT, () => {}, {
+  const bridge = await createBridgeWithSyncTools(setup.workspace, () => {}, {
     operatorIdentity,
     env: env(setup),
     laosRunCommand: async (command, args) => {
@@ -91,7 +99,7 @@ async function createTrappedBridge(setup) {
         };
       }
       const { stdout, stderr } = await execFileAsync(PYTHON, args, {
-        cwd: path.join(CORE_ROOT, "src"),
+        cwd: path.join(setup.coreRoot, "src"),
         env: { ...process.env, PYTHONUTF8: "1", PYTHONDONTWRITEBYTECODE: "1" },
       });
       return { exitCode: 0, signal: null, stdout, stderr };

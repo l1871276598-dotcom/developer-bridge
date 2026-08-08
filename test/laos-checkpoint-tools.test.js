@@ -32,10 +32,11 @@ async function git(cwd, ...args) {
 async function fixture(t) {
   const base = await realpath(await mkdtemp(path.join(os.homedir(), ".developer-bridge-checkpoint-test-")));
   const workspace = path.join(base, "workspace");
+  const coreRoot = path.join(base, "core-runtime");
   const dataRoot = path.join(base, "data");
   const stateDir = path.join(base, "state");
   await Promise.all([
-    mkdir(path.join(workspace, "src"), { recursive: true }),
+    mkdir(path.join(coreRoot, "src"), { recursive: true }),
     mkdir(path.join(workspace, "tools"), { recursive: true }),
     mkdir(dataRoot),
     mkdir(stateDir),
@@ -44,7 +45,7 @@ async function fixture(t) {
     type: "research-agent-data-root",
     format_version: 1,
   }), "utf8");
-  await writeFile(path.join(workspace, "src", "laos.py"), "print('fixture')\n", "utf8");
+  await writeFile(path.join(coreRoot, "src", "laos.py"), "print('fixture')\n", "utf8");
   await writeFile(path.join(workspace, "tools", "developer_bridge_adapter.py"), "# fixture\n", "utf8");
   await git(workspace, "init", "--quiet", "-b", "feat/checkpoint");
   await git(workspace, "config", "user.name", "Test User");
@@ -52,7 +53,7 @@ async function fixture(t) {
   await git(workspace, "add", ".");
   await git(workspace, "commit", "--quiet", "-m", "fixture");
   t.after(() => rm(base, { recursive: true, force: true }));
-  return { base, workspace, dataRoot, stateDir };
+  return { base, workspace, coreRoot, dataRoot, stateDir };
 }
 
 function environment(item, overrides = {}) {
@@ -61,6 +62,7 @@ function environment(item, overrides = {}) {
     HOME: process.env.HOME,
     LANG: process.env.LANG,
     DEVELOPER_BRIDGE_CAPABILITY_PROFILE: "controlled-engineering-v1",
+    LAOS_CORE_ROOT: item.coreRoot,
     LAOS_DATA_ROOT: item.dataRoot,
     LAOS_STATE_DIR: item.stateDir,
     LAOS_ENABLE_CHECKPOINT_CAPTURE: "1",

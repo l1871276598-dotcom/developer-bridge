@@ -153,3 +153,21 @@ test("GP7-05: rejects nested flow collections instead of silently mis-splitting"
   assert.throws(() => parseFrontMatterYaml("meta: {k: {a: 1,b: 2}, n: 3}\n"), { name: "YamlError" });
   assert.throws(() => parseFrontMatterYaml("tags: [a, {k: v}, c]\n"), { name: "YamlError" });
 });
+
+test("GP8-04: strips a comment after a completed quoted scalar (no silent divergence)", () => {
+  // Previously `id: "alpha" # comment` fell through to raw-text return and
+  // silently kept the quotes+comment in the value (`"alpha" # comment`).
+  assert.equal(parseFrontMatterYaml('id: "alpha" # comment\n').id, "alpha");
+  assert.equal(parseFrontMatterYaml("id: 'alpha' # comment\n").id, "alpha");
+});
+
+test("GP8-04: rejects malformed quoted scalars and unbalanced flow (fail closed)", () => {
+  // Trailing junk after a closed quote, unterminated quotes, and unbalanced
+  // flow collections are silent-misparse vectors and must reject.
+  assert.throws(() => parseFrontMatterYaml('id: "alpha" junk\n'), { name: "YamlError" });
+  assert.throws(() => parseFrontMatterYaml('id: "alpha\n'), { name: "YamlError" });
+  assert.throws(() => parseFrontMatterYaml("x: [a, b]]\n"), { name: "YamlError" });
+  assert.throws(() => parseFrontMatterYaml("x: [a, b\n"), { name: "YamlError" });
+  assert.throws(() => parseFrontMatterYaml("x: {a: 1\n"), { name: "YamlError" });
+  assert.throws(() => parseFrontMatterYaml('x: ["a, b]\n'), { name: "YamlError" });
+});

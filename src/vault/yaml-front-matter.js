@@ -42,14 +42,16 @@ function safeKey(key, context) {
   return key;
 }
 
-// Fail-closed guard for the naive flow parser (GP6-02 + GP7-05). The parser
-// splits flow collections with split(","), which is only correct for flat,
-// unquoted items. Reject (rather than silently mis-split) when:
+// Fail-closed guard for the naive flow parser (GP6-02 + GP7-05 + GP8-04). The
+// parser splits flow collections with split(","), which is only correct for
+// flat, unquoted items. Reject (rather than silently mis-split) when:
 //   - a comma sits inside a quoted item (GP6-02), or
-//   - the flow collection nests to depth > 1 (GP7-05): `[a, [b, c]]` or
-//     `{k: {a: 1}, n: 3}` would otherwise be cut on the inner commas.
+//   - the flow collection nests to depth > 1 (GP7-05), or
+//   - the flow is unbalanced: brackets/braces do not close, or a quote stays
+//     open, by the end of the collection (GP8-04).
 // inner is the content INSIDE the enclosing [..] / {..}, so it starts at
-// depth 1; any `[` or `{` pushes it to 2 = nested = unsupported.
+// depth 1; any `[` or `{` pushes it to 2 = nested = unsupported, and a `]`/`}`
+// that drops it below 1 means the enclosing collection itself is unbalanced.
 function rejectUnsupportedFlow(inner) {
   let inSingle = false;
   let inDouble = false;
@@ -76,7 +78,16 @@ function rejectUnsupportedFlow(inner) {
       }
     } else if (c === "]" || c === "}") {
       depth -= 1;
+      if (depth < 1) {
+        throw new YamlError("unbalanced flow collection");
+      }
     }
+  }
+  if (depth !== 1) {
+    throw new YamlError("unbalanced flow collection");
+  }
+  if (inSingle || inDouble) {
+    throw new YamlError("unterminated quote in flow collection");
   }
 }
 
@@ -105,12 +116,28 @@ function parseScalar(raw) {
   if (text === "true" || text === "True") return true;
   if (text === "false" || text === "False") return false;
   rejectTag(text);
-  if (
-    (text.startsWith('"') && text.endsWith('"') && text.length >= 2) ||
-    (text.startsWith("'") && text.endsWith("'") && text.length >= 2)
-  ) {
-    const body = text.slice(1, -1);
-    if (text.startsWith('"')) return body.replace(/\\"/gu, '"').replace(/\\\\/gu, "\\");
+  // Quoted scalar with an optional trailing comment: "alpha" # comment. A
+  // comment may follow a completed quoted scalar. Anything else trailing a
+  // closed quote is a malformed/unsupported construct and fails closed
+  // (GP8-04): previously `"alpha" # comment` fell through to the raw-text
+  // return and silently kept the quotes and comment in the value.
+  if (text.startsWith('"') || text.startsWith("'")) {
+    const quote = text[0];
+    // The closing quote is the LAST occurrence (the escaped `\"` inside a
+    // double-quoted scalar keeps its backslash, and `''` inside single quotes
+    // stays literal). Anything after the last quote must be empty or a
+    // comment; otherwise fail closed (GP8-04) — previously `"alpha" # comment`
+    // silently kept the quotes+comment in the value.
+    const close = text.lastIndexOf(quote);
+    if (close <= 0) {
+      throw new YamlError("unterminated quoted scalar");
+    }
+    const rest = text.slice(close + 1).trim();
+    if (rest !== "" && !rest.startsWith("#")) {
+      throw new YamlError("unexpected content after quoted scalar");
+    }
+    const body = text.slice(1, close);
+    if (quote === '"') return body.replace(/\\"/gu, '"').replace(/\\\\/gu, "\\");
     return body.replace(/''/gu, "'");
   }
   if (/^[-+]?\d+$/u.test(text)) {
@@ -118,15 +145,21 @@ function parseScalar(raw) {
     if (Number.isSafeInteger(num)) return num;
   }
   if (/^[-+]?(\d+\.\d*|\.\d+)([eE][-+]?\d+)?$/u.test(text)) return Number(text);
-  // Flow sequence [a, b, c]
-  if (text.startsWith("[") && text.endsWith("]")) {
+  // Flow sequence [a, b, c] — must be balanced (GP8-04).
+  if (text.startsWith("[")) {
+    if (!text.endsWith("]")) {
+      throw new YamlError("unbalanced flow sequence");
+    }
     const inner = text.slice(1, -1).trim();
     if (inner === "") return [];
     rejectUnsupportedFlow(inner);
     return inner.split(",").map((item) => parseScalar(item));
   }
-  // Flow map {k: v, ...}
-  if (text.startsWith("{") && text.endsWith("}")) {
+  // Flow map {k: v, ...} — must be balanced (GP8-04).
+  if (text.startsWith("{")) {
+    if (!text.endsWith("}")) {
+      throw new YamlError("unbalanced flow map");
+    }
     const inner = text.slice(1, -1).trim();
     if (inner === "") return {};
     rejectUnsupportedFlow(inner);

@@ -18,6 +18,9 @@ export class CoreClientError extends Error {
   }
 }
 
+const TIMEOUT_MS = 120_000;
+const MAX_OUTPUT_BYTES = 1024 * 1024;
+
 // The ONLY accepted handle grammar. Core memory ids are type-day-uuid8 slugs
 // (e.g. principle-2026-08-07-3f2a1b9c), so a valid id MUST contain at least
 // one "-". A bare slug like "unknown" or "memory:unknown" is never a valid Core
@@ -60,9 +63,11 @@ export function parseMemoryHandle(item) {
 }
 
 function findCodeRoot() {
-  const workspace = process.env.DEVELOPER_BRIDGE_WORKSPACE;
-  if (!workspace) throw new CoreClientError("core_unavailable", "DEVELOPER_BRIDGE_WORKSPACE is not set");
-  return workspace;
+  // GP8-01: Core executes from the immutable LAOS_CORE_ROOT runtime, never the
+  // Agent-writable workspace. DEVELOPER_BRIDGE_WORKSPACE is a data context.
+  const core = process.env.LAOS_CORE_ROOT;
+  if (!core) throw new CoreClientError("core_unavailable", "LAOS_CORE_ROOT is not set");
+  return core;
 }
 
 function findCli() {
@@ -84,29 +89,69 @@ function runCli(env, taskJson) {
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    // GP8-03: bounded child — timeout + output cap, pipes always drained so the
+    // cap actually trips. A hung or chatty Core child cannot block the Bridge
+    // forever or exhaust memory (mirrors vault/laos-publisher.js runCli).
     const stdout = [];
     const stderr = [];
-    child.stdout.on("data", (chunk) => stdout.push(chunk));
-    child.stderr.on("data", (chunk) => stderr.push(chunk));
-    child.once("error", (error) => reject(error));
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let timedOut = false;
+    let outputLimitExceeded = false;
+    let settled = false;
+    let timer;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const collect = (target, chunk, isStdout) => {
+      if (isStdout) stdoutBytes += chunk.length;
+      else stderrBytes += chunk.length;
+      if (stdoutBytes > MAX_OUTPUT_BYTES || stderrBytes > MAX_OUTPUT_BYTES) {
+        outputLimitExceeded = true;
+        child.kill("SIGKILL");
+      }
+      target.push(chunk);
+    };
+    child.stdout.on("data", (chunk) => collect(stdout, chunk, true));
+    child.stderr.on("data", (chunk) => collect(stderr, chunk, false));
+    child.once("error", (error) => finish(error));
     child.once("close", (code) => {
-      if (code !== 0) {
-        reject(new CoreClientError("core_call_failed", `LAOS CLI exited ${code}: ${Buffer.concat(stderr).toString("utf8").slice(0, 400)}`));
+      if (outputLimitExceeded) {
+        finish(new CoreClientError("core_call_failed", "LAOS CLI output limit exceeded"));
         return;
       }
-      resolve(Buffer.concat(stdout).toString("utf8"));
+      if (timedOut) {
+        finish(new CoreClientError("core_call_failed", "LAOS CLI timed out"));
+        return;
+      }
+      if (code !== 0) {
+        finish(new CoreClientError("core_call_failed", `LAOS CLI exited ${code}: ${Buffer.concat(stderr).toString("utf8").slice(0, 400)}`));
+        return;
+      }
+      finish(null, Buffer.concat(stdout).toString("utf8"));
     });
+    timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
+    }, TIMEOUT_MS);
+    timer.unref();
   });
 }
 
 /**
  * Build a projectmem core client bound to a trusted scope (F-07 / C-INV-13).
  *
- * The scope (workspace/project/confidentiality) is bound at construction from
- * the validated manifest + trusted Bridge profile. Callers of
- * searchHandles()/buildContext() cannot supply their own scope per call — the
- * manifest is reconciled against the profile before the client exists, so a
- * forged or mis-scoped manifest can never reach Core through this client.
+ * The authoritative scope (workspace/project/confidentiality) is derived ONLY
+ * from the trusted Bridge profile. The manifest is not trusted: it declares a
+ * scope claim that must equal the profile, and any mismatch is a hard
+ * scope_mismatch. This is defense-in-depth — a caller that skips
+ * initProjectmem's reconcile cannot route a mis-scoped manifest into Core
+ * through this client.
  */
 export function buildCoreClient({ manifest, trustedProfile, env, runner } = {}) {
   if (!manifest || typeof manifest !== "object") {
@@ -115,10 +160,30 @@ export function buildCoreClient({ manifest, trustedProfile, env, runner } = {}) 
   if (!trustedProfile || typeof trustedProfile !== "object") {
     throw new CoreClientError("core_invalid_profile", "trusted Bridge profile is required");
   }
-  // Scope is fixed at construction. The manifest must already be reconciled
-  // with the profile (see initProjectmem); this client never re-derives scope.
-  const workspace = manifest.workspace;
-  const project = manifest.project;
+  const { workspace, project, confidentiality_ceiling: ceiling } = trustedProfile;
+  if (workspace !== "personal" && workspace !== "work") {
+    throw new CoreClientError("core_invalid_profile", "trusted profile workspace is invalid");
+  }
+  if (typeof project !== "string" || project.length === 0) {
+    throw new CoreClientError("core_invalid_profile", "trusted profile project is invalid");
+  }
+  // Manifest scope claims are NOT authoritative. They must equal the trusted
+  // profile exactly (GP8-02); otherwise a workspace-controlled manifest could
+  // route cross-scope context.build / memory.search into Core.
+  const manifestWorkspace = manifest.workspace;
+  const manifestProject = manifest.project;
+  if (manifestWorkspace !== workspace) {
+    throw new CoreClientError("scope_mismatch", "manifest workspace does not match the trusted Bridge profile");
+  }
+  if (manifestProject !== project) {
+    throw new CoreClientError("scope_mismatch", "manifest project does not match the trusted Bridge profile");
+  }
+  const rank = { public: 0, personal: 1, internal: 2, restricted: 3 };
+  const manifestCeiling = manifest.confidentiality_ceiling;
+  if (manifestCeiling !== undefined && rank[manifestCeiling] > rank[ceiling ?? "internal"]) {
+    throw new CoreClientError("scope_mismatch", "manifest confidentiality exceeds the trusted Bridge profile ceiling");
+  }
+  // Authoritative scope comes from the trusted profile, never from the manifest.
   const run = runner ?? runCli;
   const resolveEnv = env ?? process.env;
 

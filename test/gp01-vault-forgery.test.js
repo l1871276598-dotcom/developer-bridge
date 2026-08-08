@@ -26,21 +26,24 @@ async function git(cwd, ...args) {
 async function fixture(t) {
   const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "laos-gp01-")));
   const workspace = path.join(base, "workspace");
+  const coreRoot = path.join(base, "core-runtime");
   const vault = path.join(base, "vault");
   const dataRoot = path.join(base, "data");
   const stateDir = path.join(base, "state");
   await Promise.all([
-    mkdir(path.join(workspace, "src"), { recursive: true }),
+    mkdir(workspace, { recursive: true }),
+    mkdir(path.join(coreRoot, "src"), { recursive: true }),
     mkdir(path.join(vault, "01-Projects", "LAOS"), { recursive: true }),
     mkdir(dataRoot, { recursive: true }),
     mkdir(stateDir, { recursive: true }),
   ]);
   await writeFile(path.join(dataRoot, ".research-agent-root"), "{}\n", "utf8");
-  await writeFile(path.join(workspace, "src", "laos.py"), "print('fixture')\n", "utf8");
+  await writeFile(path.join(coreRoot, "src", "laos.py"), "print('fixture')\n", "utf8");
   await git(workspace, "init", "--quiet", "-b", "feat/gp01");
   await git(workspace, "config", "user.name", "Test");
   await git(workspace, "config", "user.email", "t@invalid.example");
-  await git(workspace, "add", "src/laos.py");
+  await writeFile(path.join(workspace, "context.txt"), "fixture\n", "utf8");
+  await git(workspace, "add", "context.txt");
   await git(workspace, "commit", "--quiet", "-m", "fixture");
   // Vault config with a partition rule.
   await writeFile(path.join(base, "vault-config.json"), JSON.stringify({
@@ -52,7 +55,7 @@ async function fixture(t) {
   const NOTE = `---\nid: gp01-note-001\ntitle: GP01\n---\n\nreal vault body\n`;
   await writeFile(path.join(vault, "01-Projects", "LAOS", "design.md"), NOTE);
   t.after(() => rm(base, { recursive: true, force: true }));
-  return { base, workspace, vault, dataRoot, stateDir, noteContent: NOTE };
+  return { base, workspace, coreRoot, vault, dataRoot, stateDir, noteContent: NOTE };
 }
 
 function env(item, overrides = {}) {
@@ -60,6 +63,7 @@ function env(item, overrides = {}) {
     PATH: process.env.PATH,
     HOME: process.env.HOME,
     DEVELOPER_BRIDGE_CAPABILITY_PROFILE: "controlled-engineering-v1",
+    LAOS_CORE_ROOT: item.coreRoot,
     LAOS_DATA_ROOT: item.dataRoot,
     LAOS_STATE_DIR: item.stateDir,
     LAOS_CHECKPOINT_WORKSPACE: PROFILE.workspace,
