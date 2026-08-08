@@ -123,13 +123,26 @@ function parseScalar(raw) {
   // return and silently kept the quotes and comment in the value.
   if (text.startsWith('"') || text.startsWith("'")) {
     const quote = text[0];
-    // The closing quote is the LAST occurrence (the escaped `\"` inside a
-    // double-quoted scalar keeps its backslash, and `''` inside single quotes
-    // stays literal). Anything after the last quote must be empty or a
-    // comment; otherwise fail closed (GP8-04) — previously `"alpha" # comment`
-    // silently kept the quotes+comment in the value.
-    const close = text.lastIndexOf(quote);
-    if (close <= 0) {
+    // Find the TRUE closing quote, scanning left-to-right and honoring escapes
+    // (GP9-04). `lastIndexOf` was wrong: for a single-quoted scalar, `''` is an
+    // escaped quote, so `'alpha''` has NO closing quote (the last two quotes
+    // form one escaped `'`) — lastIndexOf would misread the final escaped quote
+    // as the closer and silently return `alpha'`. For double quotes, `\"` is an
+    // escape. Walk char-by-char; the first unescaped same-quote is the closer.
+    let close = -1;
+    for (let i = 1; i < text.length; i += 1) {
+      if (quote === "'" && text[i] === "'") {
+        if (text[i + 1] === "'") { i += 1; continue; } // '' escaped quote
+        close = i;
+        break;
+      }
+      if (quote === '"' && text[i] === '"') {
+        if (text[i - 1] === "\\") continue; // \" escaped quote
+        close = i;
+        break;
+      }
+    }
+    if (close < 0) {
       throw new YamlError("unterminated quoted scalar");
     }
     const rest = text.slice(close + 1).trim();
@@ -222,7 +235,16 @@ export function parseFrontMatterYaml(text) {
 
     const colonIdx = content.indexOf(":");
     if (colonIdx < 0) throw new YamlError(`unparsable line: ${trimmed}`);
-    const key = content.slice(0, colonIdx).trim();
+    let key = content.slice(0, colonIdx).trim();
+    // GP9-04: a quoted key (`'id':`) must unquote to its semantic string, not
+    // survive as a literal `'id'` key — otherwise buildNoteIdentity looks up
+    // frontMatter.id and misses a genuinely-quoted `id`. Parse it through the
+    // scalar path so quotes/escapes are honored, and require a string result.
+    if (key.startsWith('"') || key.startsWith("'")) {
+      const parsedKey = parseScalar(key);
+      if (typeof parsedKey !== "string") throw new YamlError("mapping key must be a string");
+      key = parsedKey;
+    }
     rejectMergeKey(trimmed);
     safeKey(key, "mapping");
     let valueText = content.slice(colonIdx + 1).trim();

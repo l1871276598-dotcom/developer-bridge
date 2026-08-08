@@ -83,9 +83,9 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
   if (!project) return null;
   const profile = { workspace, project, confidentiality_ceiling: ceiling };
 
-  // The evidence.publish forwarding uses the default runCli (resolving the CLI
-  // under codeRoot and spawning env.LAOS_PYTHON_EXECUTABLE), the same fixed
-  // runner shape as laos_memory_task. childEnv carries the frozen verified root.
+  // The evidence.publish forwarding uses the shared TrustedCoreRunner (GP9-01):
+  // the same bounded spawn + verified interpreter + sanitized env as every
+  // other Core child. childEnv carries the frozen verified root.
   // GP7-02: the codeRoot is resolved PER CALL — a workspace swap between
   // construction and this request must not run Core from the stale workspace.
   const publish = async (evidenceInput, effectiveCodeRoot) => {
@@ -93,6 +93,7 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
     const publisher = buildLaosEvidencePublisher({
       env: childEnv,
       codeRoot: effectiveCodeRoot,
+      runner,
     });
     return publisher(evidenceInput);
   };
@@ -102,12 +103,16 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
   // (and the Bridge) never supply vault_root — Core derives it from its own
   // administrator config (LAOS_VAULT_ROOT). The task carries only relative_path.
   const vaultRead = async (relativePath, effectiveCodeRoot) => {
-    const { runCli } = await import("./laos-publisher.js");
     const task = {
       type: "vault.read",
       input: { relative_path: relativePath },
     };
-    const stdout = await runCli(childEnv, JSON.stringify(task), effectiveCodeRoot);
+    // Pass childEnv (with the frozen LAOS_VAULT_ROOT) as extraEnv so the vault
+    // child reads from the exact trusted root (GP4-01/GP6-01).
+    const stdout = await runner.runCli(JSON.stringify(task), {
+      cwd: effectiveCodeRoot,
+      extraEnv: childEnv,
+    });
     let parsed;
     try {
       parsed = JSON.parse(stdout);

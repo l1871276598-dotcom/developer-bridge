@@ -41,6 +41,7 @@ function env(fixture, overrides = {}) {
     HOME: process.env.HOME,
     DEVELOPER_BRIDGE_CAPABILITY_PROFILE: "controlled-engineering-v1",
     LAOS_CORE_ROOT: fixture.coreRoot,
+    LAOS_PYTHON_EXECUTABLE: process.env.LAOS_PYTHON_EXECUTABLE || "/opt/homebrew/bin/python3",
     LAOS_DATA_ROOT: fixture.dataRoot,
     LAOS_STATE_DIR: fixture.stateDir,
     // Trusted Bridge profile scope (C-INV-13). LAOS tasks are fail-closed
@@ -90,7 +91,9 @@ test("conditionally exposes one LAOS memory task bound to external data and stat
   assert.equal(result.isError, undefined, result.content?.[0]?.text);
   assert.deepEqual(JSON.parse(result.content[0].text), { ok: true, data_root: "[laos-data]" });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].command, process.platform === "win32" ? "python" : "python3");
+  // GP9-01: the trusted interpreter (absolute, verified path) is the command.
+  const expectedInterp = process.env.LAOS_PYTHON_EXECUTABLE || "/opt/homebrew/bin/python3";
+  assert.equal(calls[0].command, expectedInterp);
   assert.equal(calls[0].options.cwd, item.coreRoot);
   assert.deepEqual(calls[0].args.slice(0, 5), [
     path.join(item.coreRoot, "src", "laos.py"),
@@ -203,7 +206,7 @@ print(json.dumps({"ok": True, "task_type": task["type"], "data_root": args.root,
   assert.deepEqual(JSON.parse(await readFile(path.join(item.dataRoot, "smoke-task.json"), "utf8")), {
     type: "memory.search",
     workspace: "personal",
-    input: { query: "bridge smoke", workspace: "personal", project: "laos" },
+    input: { query: "bridge smoke", workspace: "personal", project: "laos", confidentiality: "personal" },
   });
   assert.equal(await readFile(path.join(item.stateDir, "smoke-state.txt"), "utf8"), "ok\n");
 });

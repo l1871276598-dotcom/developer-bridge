@@ -109,14 +109,14 @@ export function runCli(env, taskJson, codeRoot, options = {}) {
  * dispatcher would forward, so behavior is identical to a live Bridge call.
  */
 export function buildLaosEvidencePublisher({ env, runner, codeRoot } = {}) {
-  const run = runner ?? runCli;
+  const run = runner?.runCli ? runner.runCli.bind(runner) : runCli;
   const profileEnv = env ?? process.env;
   return async (input) => {
     const { task, expectedIdentity } = normalizeEvidenceIngress(
       { type: "evidence.publish", input },
       profileEnv,
     );
-    const stdout = await run(profileEnv, JSON.stringify(task), codeRoot);
+    const stdout = await run(JSON.stringify(task), { cwd: codeRoot });
     let parsed;
     try {
       parsed = JSON.parse(stdout);

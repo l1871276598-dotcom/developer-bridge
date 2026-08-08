@@ -22,7 +22,7 @@ nothing: null
 
 test("parses quoted strings", () => {
   const obj = parseFrontMatterYaml(`
-title: "quoted \"value\""
+title: "quoted \\"value\\""
 path: 'single quoted'
 `);
   assert.equal(obj.title, 'quoted "value"');
@@ -170,4 +170,20 @@ test("GP8-04: rejects malformed quoted scalars and unbalanced flow (fail closed)
   assert.throws(() => parseFrontMatterYaml("x: [a, b\n"), { name: "YamlError" });
   assert.throws(() => parseFrontMatterYaml("x: {a: 1\n"), { name: "YamlError" });
   assert.throws(() => parseFrontMatterYaml('x: ["a, b]\n'), { name: "YamlError" });
+});
+
+test("GP9-04: an escaped trailing quote is not a closing quote (unterminated → reject)", () => {
+  // 'alpha'' — the last two quotes form one escaped ', so there is NO closing
+  // quote. lastIndexOf would have misread the escaped quote as the closer and
+  // silently returned `alpha'`; now it rejects fail-closed.
+  assert.throws(() => parseFrontMatterYaml("title: 'alpha''\n"), { name: "YamlError" });
+  assert.throws(() => parseFrontMatterYaml('title: "alpha\\"\n'), { name: "YamlError" });
+});
+
+test("GP9-04: a quoted mapping key unquotes to its semantic string", () => {
+  // 'id': stable must produce { id: ... }, not { "'id'": ... } — otherwise
+  // buildNoteIdentity looks up frontMatter.id and misses a quoted id key.
+  const obj = parseFrontMatterYaml("'id': stable-note-id\n");
+  assert.equal(obj.id, "stable-note-id");
+  assert.equal(Object.prototype.hasOwnProperty.call(obj, "'id'"), false);
 });

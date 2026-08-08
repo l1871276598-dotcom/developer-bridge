@@ -168,8 +168,10 @@ export function buildCoreClient({ manifest, trustedProfile, env, runner } = {}) 
     throw new CoreClientError("core_invalid_profile", "trusted profile project is invalid");
   }
   // Manifest scope claims are NOT authoritative. They must equal the trusted
-  // profile exactly (GP8-02); otherwise a workspace-controlled manifest could
-  // route cross-scope context.build / memory.search into Core.
+  // profile exactly (GP8-02 + GP9-03): workspace, project AND confidentiality
+  // ceiling must be an exact match — not merely "not exceeding". An invalid or
+  // unknown manifest ceiling value is a hard mismatch (undefined rank must not
+  // silently pass the comparison).
   const manifestWorkspace = manifest.workspace;
   const manifestProject = manifest.project;
   if (manifestWorkspace !== workspace) {
@@ -180,11 +182,24 @@ export function buildCoreClient({ manifest, trustedProfile, env, runner } = {}) 
   }
   const rank = { public: 0, personal: 1, internal: 2, restricted: 3 };
   const manifestCeiling = manifest.confidentiality_ceiling;
-  if (manifestCeiling !== undefined && rank[manifestCeiling] > rank[ceiling ?? "internal"]) {
-    throw new CoreClientError("scope_mismatch", "manifest confidentiality exceeds the trusted Bridge profile ceiling");
+  if (manifestCeiling === undefined) {
+    throw new CoreClientError("scope_mismatch", "manifest must declare a confidentiality ceiling");
+  }
+  if (typeof manifestCeiling !== "string" || !(manifestCeiling in rank)) {
+    throw new CoreClientError("scope_mismatch", "manifest confidentiality ceiling is invalid");
+  }
+  if (typeof ceiling !== "string" || !(ceiling in rank)) {
+    throw new CoreClientError("core_invalid_profile", "trusted profile confidentiality ceiling is invalid");
+  }
+  if (manifestCeiling !== ceiling) {
+    throw new CoreClientError("scope_mismatch", "manifest confidentiality ceiling must match the trusted Bridge profile exactly");
   }
   // Authoritative scope comes from the trusted profile, never from the manifest.
-  const run = runner ?? runCli;
+  // The runner is either the shared TrustedCoreRunner (has runCli) or a legacy
+  // (env, taskJson) function (tests / host override).
+  const run = runner?.runCli
+    ? (taskJson) => runner.runCli(taskJson, {})
+    : (taskJson) => runner(env ?? process.env, taskJson);
   const resolveEnv = env ?? process.env;
 
   function checkCoreResponse(parsed, taskType) {
@@ -198,12 +213,14 @@ export function buildCoreClient({ manifest, trustedProfile, env, runner } = {}) 
   }
 
   async function contextSha256(query) {
+    // GP9-02: the trusted confidentiality ceiling is a read-authorization
+    // parameter on the Core request, not dropped at the Bridge.
     const task = {
       type: "context.build",
-      input: { query, workspace, project },
+      input: { query, workspace, project, confidentiality: ceiling },
       context_limit: 16000,
     };
-    const stdout = await run(resolveEnv, JSON.stringify(task));
+    const stdout = await run(JSON.stringify(task));
     let parsed;
     try {
       parsed = JSON.parse(stdout);
@@ -221,9 +238,9 @@ export function buildCoreClient({ manifest, trustedProfile, env, runner } = {}) 
   async function searchHandles(limit = 20) {
     const task = {
       type: "memory.search",
-      input: { query: project ?? workspace, workspace, project, limit },
+      input: { query: project ?? workspace, workspace, project, confidentiality: ceiling, limit },
     };
-    const stdout = await run(resolveEnv, JSON.stringify(task));
+    const stdout = await run(JSON.stringify(task));
     let parsed;
     try {
       parsed = JSON.parse(stdout);

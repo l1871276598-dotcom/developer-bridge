@@ -162,9 +162,13 @@ const SHA256_RE = /^[0-9a-f]{64}$/u;
 // workspace only from the top-level task object and appear with an empty list.
 const SCOPE_INPUT_TASKS = Object.freeze({
   "memory.create": ["workspace", "project", "confidentiality"],
-  "memory.search": ["workspace", "project"],
-  "context.build": ["workspace", "project"],
-  "handoff.write": ["workspace"],
+  // GP9-02: read-path tasks carry the trusted confidentiality ceiling so Core
+  // can filter records by caller authority (public < personal < internal <
+  // restricted), instead of dropping it and letting all non-restricted records
+  // leak to any profile.
+  "memory.search": ["workspace", "project", "confidentiality"],
+  "context.build": ["workspace", "project", "confidentiality"],
+  "handoff.write": ["workspace", "project"],
   // evidence.publish is NOT an external dispatcher task (GP-01); it is the
   // internal-only publication target the Bridge-owned Vault publisher forwards
   // to Core. Its Core agent reads scope from input, so the internal normalizer
@@ -173,7 +177,7 @@ const SCOPE_INPUT_TASKS = Object.freeze({
   "vault.snapshot.publish": [],
   "loop.reflect": [],
   "loop.suggest-policies": [],
-  "loop.generate-candidate": [],
+  "loop.generate-candidate": ["workspace", "project"],
   "loop.coordinate": ["workspace", "project"],
   "reflection.prepare": [],
   "reflection.apply": ["workspace", "project", "confidentiality"],
@@ -523,7 +527,12 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
     throw new Error("LAOS Core runtime must be separate from the writable workspace");
   }
   await resolveCli(coreRoot);
-  const runner = options.runCommand || runFixed;
+  // GP9-01: single TrustedCoreRunner — verified interpreter + sanitized env
+  // (no PYTHONPATH/user-site, isolated mode, PATH stripped of the writable
+  // workspace) + bounded spawn. Every Core child shares this one path.
+  const { createCoreRunner } = await import("./core-runner.js");
+  const coreRunner = await createCoreRunner({ env, codeRoot: initialCodeRoot, runCommand: options.runCommand });
+  const runner = coreRunner.runTask.bind(coreRunner);
 
   // Vault-owned evidence publisher (GP-01): injected by the host, or built
   // from the environment's vault configuration. It performs the trusted Vault
@@ -533,7 +542,7 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
   let vaultPublish = options.vaultPublish;
   if (!vaultPublish) {
     const { buildEnvVaultPublisher } = await import("./vault/env-publisher.js");
-    vaultPublish = await buildEnvVaultPublisher(env, { codeRoot: coreRoot, runner });
+    vaultPublish = await buildEnvVaultPublisher(env, { codeRoot: coreRoot, runner: coreRunner });
   }
 
   return Object.freeze({
@@ -554,8 +563,8 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
         // artifact. The caller supplies only relative_path; the adapter reads
         // the Vault, derives identity, resolves the partition, and publishes
         // through Core. Without a configured adapter this fails closed.
-        // GP7-02 + GP8-01: the publisher always runs Core from the immutable
-        // coreRoot (never the writable workspace).
+        // GP7-02 + GP8-01 + GP9-01: the publisher always runs Core from the
+        // immutable coreRoot via the shared TrustedCoreRunner.
         if (!vaultPublish) {
           fail("vault_unavailable", { message: "Vault evidence publishing is not configured" });
         }
@@ -570,9 +579,8 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
       }
 
       const result = await runner(
-        process.platform === "win32" ? "python" : "python3",
-        [cli, "--root", dataRoot, "--state-dir", stateDir, "--task-json", taskJson],
-        { cwd: coreRoot, env: safeEnvironment(env), timeoutMs: TIMEOUT_MS },
+        taskJson,
+        { cwd: coreRoot, timeoutMs: TIMEOUT_MS },
       );
       if (result?.timedOut === true) fail("laos_task_timeout");
       if (result?.outputLimitExceeded === true) fail("laos_output_limit_exceeded");

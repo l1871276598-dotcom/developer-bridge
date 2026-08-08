@@ -221,10 +221,10 @@ test("F-01 PASS: caller input scope that already equals the trusted profile is n
   assert.equal(result.isError, undefined, result.content?.[0]?.text);
   assert.equal(spy.calls, 1);
   const forwarded = spy.forwarded[0];
-  // memory.search consumes workspace/project; confidentiality is stripped
-  // because Core's SearchAgent does not read it.
+  // memory.search consumes workspace/project/confidentiality (GP9-02: the
+  // trusted confidentiality ceiling is a Core read-authorization parameter).
   assert.equal(forwarded.workspace, "personal");
   assert.equal(forwarded.input.workspace, "personal");
   assert.equal(forwarded.input.project, "laos");
-  assert.equal("confidentiality" in forwarded.input, false);
+  assert.equal(forwarded.input.confidentiality, "personal");
 });
