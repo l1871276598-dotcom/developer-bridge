@@ -49,11 +49,25 @@ test("GP8-02: buildCoreClient rejects a manifest whose scope disagrees with the 
     () => buildCoreClient({ manifest: badProject, trustedProfile: PROFILE }),
     (e) => e instanceof CoreClientError && e.code === "scope_mismatch",
   );
-  const badCeiling = { ...MANIFEST, confidentiality_ceiling: "restricted" };
-  assert.throws(
-    () => buildCoreClient({ manifest: badCeiling, trustedProfile: PROFILE }),
-    (e) => e instanceof CoreClientError && e.code === "scope_mismatch",
-  );
+test("GP9-03: an exact match in confidentiality ceiling constructs a valid client", () => {
+  const ok = buildCoreClient({
+    manifest: MANIFEST,
+    trustedProfile: PROFILE,
+    runner: runnerReturning({ output: { text: "ctx" } }),
+  });
+  assert.ok(ok);
+});
+
+test("GP10-10: manifest ceiling rejects prototype-inherited keys (constructor/toString/__proto__)", () => {
+  for (const bad of ["constructor", "toString", "__proto__"]) {
+    assert.throws(
+      () => buildCoreClient({
+        manifest: { ...MANIFEST, confidentiality_ceiling: bad },
+        trustedProfile: PROFILE,
+      }),
+      (e) => e instanceof CoreClientError && e.code === "scope_mismatch",
+    );
+  }
 });
 
 // GP9-03: the manifest confidentiality ceiling must be an EXACT match — not a
@@ -79,9 +93,31 @@ test("GP9-03: manifest confidentiality ceiling must match the trusted profile ex
     () => buildCoreClient({ manifest: missing, trustedProfile: PROFILE }),
     (e) => e instanceof CoreClientError && e.code === "scope_mismatch",
   );
-  // exact match → constructs fine.
-  const ok = buildCoreClient({ manifest: MANIFEST, trustedProfile: PROFILE, runner: () => Promise.resolve("{}") });
+test("GP9-03: an exact match in confidentiality ceiling constructs a valid client", () => {
+  const ok = buildCoreClient({
+    manifest: MANIFEST,
+    trustedProfile: PROFILE,
+    runner: runnerReturning({ output: { text: "ctx" } }),
+  });
   assert.ok(ok);
+});
+
+test("GP10-10: manifest ceiling rejects prototype-inherited keys (constructor/toString/__proto__)", () => {
+  for (const bad of ["constructor", "toString", "__proto__"]) {
+    assert.throws(
+      () => buildCoreClient({
+        manifest: { ...MANIFEST, confidentiality_ceiling: bad },
+        trustedProfile: PROFILE,
+      }),
+      (e) => e instanceof CoreClientError && e.code === "scope_mismatch",
+    );
+  }
+  // "personal" is a real rank key and still accepted.
+  assert.doesNotThrow(() => buildCoreClient({
+    manifest: { ...MANIFEST, confidentiality_ceiling: "personal" },
+    trustedProfile: { ...PROFILE, confidentiality_ceiling: "personal" },
+    runner: runnerReturning({ output: { text: "ctx" } }),
+  }));
 });
 
 test("GP8-02: a matching manifest constructs a client bound to the trusted profile scope", () => {

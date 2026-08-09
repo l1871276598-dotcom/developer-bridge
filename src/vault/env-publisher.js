@@ -160,11 +160,17 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
     const confirmed = verifyScope(partition, profile);
     const { identity, input: snapshotInput } = buildCanonicalNoteSnapshot(raw, noteRelativePath, partition);
 
+    // GP10-08: the evidence input carries the PROFILE's ceiling (authorization
+    // upper bound), NOT the note's actual confidentiality. A note classified at
+    // "public" published under an "internal" profile must carry "internal" scope
+    // so the evidence normalizer's exact-scope gate does not reject it as
+    // scope_mismatch (the profile ceiling is what the caller is authorized to
+    // see; the note's actual classification is metadata, not an authority claim).
     const evidenceInput = {
       ...snapshotInput,
       workspace: confirmed.workspace,
       project: confirmed.project,
-      confidentiality: confirmed.confidentiality,
+      confidentiality: profile.confidentiality_ceiling,
     };
     const coreResult = await publish(evidenceInput, runCodeRoot);
     return {

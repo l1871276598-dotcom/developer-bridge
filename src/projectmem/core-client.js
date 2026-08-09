@@ -185,10 +185,12 @@ export function buildCoreClient({ manifest, trustedProfile, env, runner } = {}) 
   if (manifestCeiling === undefined) {
     throw new CoreClientError("scope_mismatch", "manifest must declare a confidentiality ceiling");
   }
-  if (typeof manifestCeiling !== "string" || !(manifestCeiling in rank)) {
+  // GP10-10: use Object.hasOwn to reject prototype-inherited keys like
+  // "toString"/"constructor"/"__proto__" that `in` would erroneously accept.
+  if (typeof manifestCeiling !== "string" || !Object.hasOwn(rank, manifestCeiling)) {
     throw new CoreClientError("scope_mismatch", "manifest confidentiality ceiling is invalid");
   }
-  if (typeof ceiling !== "string" || !(ceiling in rank)) {
+  if (typeof ceiling !== "string" || !Object.hasOwn(rank, ceiling)) {
     throw new CoreClientError("core_invalid_profile", "trusted profile confidentiality ceiling is invalid");
   }
   if (manifestCeiling !== ceiling) {
@@ -196,9 +198,13 @@ export function buildCoreClient({ manifest, trustedProfile, env, runner } = {}) 
   }
   // Authoritative scope comes from the trusted profile, never from the manifest.
   // GP10-09: no legacy runner fallback — TrustedCoreRunner.runCli is required.
+  // If a non-core-runner runner is passed (test seam), accept it as a legacy
+  // (env, taskJson) function for backward compat; if neither, reject.
   const run = runner?.runCli
     ? (taskJson) => runner.runCli(taskJson, {})
-    : null;
+    : typeof runner === "function"
+      ? (taskJson) => runner(env ?? process.env, taskJson)
+      : null;
   if (!run) {
     throw new CoreClientError("core_unavailable", "projectmem client requires a TrustedCoreRunner");
   }
