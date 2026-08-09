@@ -225,7 +225,31 @@ test("F-01 PASS: caller input scope that already equals the trusted profile is n
   // memory.search consumes workspace/project/confidentiality (GP9-02: the
   // trusted confidentiality ceiling is a Core read-authorization parameter).
   assert.equal(forwarded.workspace, "personal");
+  assert.equal(forwarded.project, "laos");
+  assert.equal(forwarded.confidentiality, "personal");
   assert.equal(forwarded.input.workspace, "personal");
   assert.equal(forwarded.input.project, "laos");
   assert.equal(forwarded.input.confidentiality, "personal");
+});
+
+test("GP11-01: strict-schema tasks receive complete trusted top-level scope without input scope", async (t) => {
+  const item = await fixture(t);
+  const { bridge, spy } = await createBridgeWithSpy(item);
+
+  const result = await bridge.callTool("laos_memory_task", {
+    task: { type: "loop.reflect", workspace: "personal", input: {} },
+  });
+
+  assert.equal(result.isError, undefined, result.content?.[0]?.text);
+  assert.equal(spy.calls, 1);
+  const forwarded = spy.forwarded[0];
+  assert.deepEqual(
+    {
+      workspace: forwarded.workspace,
+      project: forwarded.project,
+      confidentiality: forwarded.confidentiality,
+    },
+    { workspace: "personal", project: "laos", confidentiality: "personal" },
+  );
+  assert.deepEqual(forwarded.input, {});
 });

@@ -10,6 +10,10 @@ import { createBridgeWithSyncTools } from "../src/bridge-with-sync-tools.js";
 
 const execFileAsync = promisify(execFile);
 const operatorIdentity = Object.freeze({ id: "laos.error.test", type: "local-human" });
+const PYTHON_EXECUTABLE = (
+  typeof process.env.LAOS_PYTHON_EXECUTABLE === "string" &&
+  path.isAbsolute(process.env.LAOS_PYTHON_EXECUTABLE)
+) ? process.env.LAOS_PYTHON_EXECUTABLE : process.execPath;
 
 async function git(cwd, ...args) {
   return execFileAsync("git", args, { cwd });
@@ -43,6 +47,7 @@ function env(item) {
     LAOS_CORE_ROOT: item.coreRoot,
     LAOS_DATA_ROOT: item.dataRoot,
     LAOS_STATE_DIR: item.stateDir,
+    LAOS_PYTHON_EXECUTABLE: PYTHON_EXECUTABLE,
     // Trusted Bridge profile scope (C-INV-13). LAOS tasks are fail-closed
     // without it, so tests that reach Core must pin the profile.
     LAOS_CHECKPOINT_WORKSPACE: "personal",

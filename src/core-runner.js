@@ -167,9 +167,6 @@ export async function createCoreRunner({ env, codeRoot, runCommand = null }) {
     // Pin the import path to the immutable runtime — never inherited PYTHONPATH.
     PYTHONPATH: path.join(coreRoot, "src"),
   };
-  // GP10-03: cache the construction-time workspace (used for interpreter
-  // containment) so call-time re-validation can compare against it.
-  const constructionCodeRoot = codeRoot;
   const baseArgs = [interpreter, ...PYTHON_ARGS];
 
   // Bounded spawn (GP7-04/GP8-03): timeout + output cap + always-drain pipes.
@@ -279,19 +276,19 @@ export async function createCoreRunner({ env, codeRoot, runCommand = null }) {
     // Task-shape runner compatible with the dispatcher's contract. When a
     // custom runCommand is injected (tests / host), it is called with the
     // (command, args) shape it expects; otherwise the bounded spawn runs.
-    async runTask(taskJson, { cwd, timeoutMs } = {}) {
+    async runTask(taskJson, { workspace, cwd, timeoutMs } = {}) {
       const cli = path.join(coreRoot, "src", "laos.py");
       const args = [cli, "--root", childEnv.LAOS_DATA_ROOT, "--state-dir", childEnv.LAOS_STATE_DIR, "--task-json", taskJson];
-      if (runCommand) {
-        // Per-call re-validation of workspace vs interpreter containment
-        // (GP10-03). The construction-time workspace is cached; the current
-        // workspace from the call options must also not overlap.
-        if (options.cwd && overlaps(options.cwd, interpreter)) {
-          throw new CoreRunnerError("invalid_workspace", "writable workspace must not contain the Python interpreter");
-        }
-        return runCommand(interpreter, args, { cwd: options.cwd ?? coreRoot, timeoutMs: options.timeoutMs });
+      if (typeof workspace !== "string" || !workspace || workspace.includes("\0") || !path.isAbsolute(workspace)) {
+        throw new CoreRunnerError("invalid_workspace", "writable workspace must be an absolute path");
       }
-      const stdout = await spawnBounded(args, { cwd, timeoutMs });
+      if (overlaps(path.resolve(workspace), interpreter)) {
+        throw new CoreRunnerError("invalid_workspace", "writable workspace must not contain the Python interpreter");
+      }
+      if (runCommand) {
+        return runCommand(interpreter, args, { cwd: cwd ?? coreRoot, timeoutMs });
+      }
+      const stdout = await spawnBounded(args, { cwd: cwd ?? coreRoot, timeoutMs });
       return { stdout, exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
     },
     // Raw stdout-returning runner for vault.read / evidence.publish. This is an

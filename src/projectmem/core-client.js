@@ -1,6 +1,4 @@
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
-import path from "node:path";
 
 /**
  * Core context/search client for projectmem.
@@ -17,9 +15,6 @@ export class CoreClientError extends Error {
     this.code = code;
   }
 }
-
-const TIMEOUT_MS = 120_000;
-const MAX_OUTPUT_BYTES = 1024 * 1024;
 
 // The ONLY accepted handle grammar. Core memory ids are type-day-uuid8 slugs
 // (e.g. principle-2026-08-07-3f2a1b9c), so a valid id MUST contain at least
@@ -62,87 +57,6 @@ export function parseMemoryHandle(item) {
   throw new CoreClientError("core_malformed_response", "memory.search returned an unrecognized handle");
 }
 
-function findCodeRoot() {
-  // GP8-01: Core executes from the immutable LAOS_CORE_ROOT runtime, never the
-  // Agent-writable workspace. DEVELOPER_BRIDGE_WORKSPACE is a data context.
-  const core = process.env.LAOS_CORE_ROOT;
-  if (!core) throw new CoreClientError("core_unavailable", "LAOS_CORE_ROOT is not set");
-  return core;
-}
-
-function findCli() {
-  return path.join(findCodeRoot(), "src", "laos.py");
-}
-
-function runCli(env, taskJson) {
-  return new Promise((resolve, reject) => {
-    const cli = findCli();
-    const args = [
-      cli,
-      "--root", env.LAOS_DATA_ROOT,
-      "--state-dir", env.LAOS_STATE_DIR,
-      "--task-json", taskJson,
-    ];
-    const child = spawn(env.LAOS_PYTHON_EXECUTABLE || "python3", args, {
-      cwd: path.dirname(cli),
-      env: { ...process.env, ...env, PYTHONUTF8: "1" },
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    // GP8-03: bounded child — timeout + output cap, pipes always drained so the
-    // cap actually trips. A hung or chatty Core child cannot block the Bridge
-    // forever or exhaust memory (mirrors vault/laos-publisher.js runCli).
-    const stdout = [];
-    const stderr = [];
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let timedOut = false;
-    let outputLimitExceeded = false;
-    let settled = false;
-    let timer;
-    const finish = (error, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (error) reject(error);
-      else resolve(value);
-    };
-    const collect = (target, chunk, isStdout) => {
-      if (isStdout) stdoutBytes += chunk.length;
-      else stderrBytes += chunk.length;
-      if (stdoutBytes > MAX_OUTPUT_BYTES || stderrBytes > MAX_OUTPUT_BYTES) {
-        outputLimitExceeded = true;
-        child.kill("SIGKILL");
-      }
-      target.push(chunk);
-    };
-    child.stdout.on("data", (chunk) => collect(stdout, chunk, true));
-    child.stderr.on("data", (chunk) => collect(stderr, chunk, false));
-    child.once("error", (error) => finish(error));
-    child.once("close", (code) => {
-      if (outputLimitExceeded) {
-        finish(new CoreClientError("core_call_failed", "LAOS CLI output limit exceeded"));
-        return;
-      }
-      if (timedOut) {
-        finish(new CoreClientError("core_call_failed", "LAOS CLI timed out"));
-        return;
-      }
-      if (code !== 0) {
-        finish(new CoreClientError("core_call_failed", `LAOS CLI exited ${code}: ${Buffer.concat(stderr).toString("utf8").slice(0, 400)}`));
-        return;
-      }
-      finish(null, Buffer.concat(stdout).toString("utf8"));
-    });
-    timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
-    }, TIMEOUT_MS);
-    timer.unref();
-  });
-}
-
 /**
  * Build a projectmem core client bound to a trusted scope (F-07 / C-INV-13).
  *
@@ -153,7 +67,7 @@ function runCli(env, taskJson) {
  * initProjectmem's reconcile cannot route a mis-scoped manifest into Core
  * through this client.
  */
-export function buildCoreClient({ manifest, trustedProfile, env, runner } = {}) {
+export function buildCoreClient({ manifest, trustedProfile, runner } = {}) {
   if (!manifest || typeof manifest !== "object") {
     throw new CoreClientError("core_invalid_manifest", "projectmem manifest is required");
   }
@@ -197,17 +111,10 @@ export function buildCoreClient({ manifest, trustedProfile, env, runner } = {}) 
     throw new CoreClientError("scope_mismatch", "manifest confidentiality ceiling must match the trusted Bridge profile exactly");
   }
   // Authoritative scope comes from the trusted profile, never from the manifest.
-  // GP10-09: no legacy runner fallback — TrustedCoreRunner.runCli is required.
-  // If a non-core-runner runner is passed (test seam), accept it as a legacy
-  // (env, taskJson) function for backward compat; if neither, reject.
-  const run = runner?.runCli
-    ? (taskJson) => runner.runCli(taskJson, {})
-    : typeof runner === "function"
-      ? (taskJson) => runner(env ?? process.env, taskJson)
-      : null;
-  if (!run) {
+  if (!runner || typeof runner !== "object" || typeof runner.runCli !== "function") {
     throw new CoreClientError("core_unavailable", "projectmem client requires a TrustedCoreRunner");
   }
+  const run = (taskJson) => runner.runCli(taskJson, {});
 
   function checkCoreResponse(parsed, taskType) {
     if (!parsed || typeof parsed !== "object") {

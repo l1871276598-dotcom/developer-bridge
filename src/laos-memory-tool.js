@@ -218,7 +218,7 @@ function normalizeScopedTask(task, env) {
     delete normalizedInput[name];
   }
 
-  const normalized = { ...task, workspace: scope.workspace };
+  const normalized = { ...task, ...scope };
   for (const name of SCOPE_INPUT_TASKS[task.type]) {
     normalizedInput[name] = scope[name];
   }
@@ -580,7 +580,7 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
 
       const result = await runner(
         taskJson,
-        { cwd: coreRoot, timeoutMs: TIMEOUT_MS },
+        { workspace: codeRoot, cwd: coreRoot, timeoutMs: TIMEOUT_MS },
       );
       if (result?.timedOut === true) fail("laos_task_timeout");
       if (result?.outputLimitExceeded === true) fail("laos_output_limit_exceeded");

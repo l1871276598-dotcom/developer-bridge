@@ -203,7 +203,12 @@ test("E2E Test 1: full chain Vault→snapshot→evidence.publish→artifact→me
   // context.build must now surface the active memory.
   const ctx = await runCoreTask(setup, {
     type: "context.build",
-    input: { query: "provenance", workspace: "personal", project: "laos" },
+    input: {
+      query: "provenance",
+      workspace: "personal",
+      project: "laos",
+      confidentiality: "personal",
+    },
   });
   assert.equal(ctx.output.limit > 0, true);
 });
@@ -300,7 +305,12 @@ test("E2E Test 7: deleting the source note keeps the artifact and does not delet
   // No memory mutation happened from deletion (adapter never creates memory).
   const search = await runCoreTask(setup, {
     type: "memory.search",
-    input: { query: "provenance", workspace: "personal", project: "laos" },
+    input: {
+      query: "provenance",
+      workspace: "personal",
+      project: "laos",
+      confidentiality: "personal",
+    },
   });
   assert.ok(Array.isArray(search.output.results));
 });

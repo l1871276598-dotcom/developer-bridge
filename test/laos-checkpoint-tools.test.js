@@ -25,6 +25,17 @@ const addedNames = new Set([
   "laos_session_get",
 ]);
 
+function coreRunnerError(code, message) {
+  return (error) => error?.name === "CoreRunnerError" &&
+    error.code === code &&
+    error.message === message;
+}
+
+function checkpointConfigurationError(error) {
+  return error?.name === "Error" &&
+    error.message === "Invalid LAOS checkpoint configuration.";
+}
+
 async function git(cwd, ...args) {
   return execFileAsync("git", args, { cwd });
 }
@@ -269,7 +280,6 @@ test("disabled legacy configuration is unchanged and illegal or partial enabled 
       env: environment(item, {
         LAOS_ENABLE_CHECKPOINT_CAPTURE: flag,
         LAOS_CHECKPOINT_WORKSPACE: undefined,
-        LAOS_PYTHON_EXECUTABLE: undefined,
       }),
       laosRunCommand: async () => success(),
     });
@@ -282,11 +292,9 @@ test("disabled legacy configuration is unchanged and illegal or partial enabled 
     { LAOS_STATE_DIR: undefined },
     { LAOS_CHECKPOINT_WORKSPACE: undefined },
     { LAOS_CHECKPOINT_WORKSPACE: "other" },
-    { LAOS_PYTHON_EXECUTABLE: undefined },
     { LAOS_CHECKPOINT_PROJECT: "" },
     { LAOS_CHECKPOINT_ACCOUNT_ID: "x".repeat(257) },
     { LAOS_CHECKPOINT_CONFIDENTIALITY: "secret" },
-    { LAOS_PYTHON_EXECUTABLE: `${path.dirname(process.execPath)}/../${path.basename(path.dirname(process.execPath))}/${path.basename(process.execPath)}` },
   ];
   for (const overrides of cases) {
     await assert.rejects(bridge(item, { env: overrides }), (error) => {
@@ -294,6 +302,11 @@ test("disabled legacy configuration is unchanged and illegal or partial enabled 
       return true;
     });
   }
+
+  await assert.rejects(
+    bridge(item, { env: { LAOS_PYTHON_EXECUTABLE: undefined } }),
+    coreRunnerError("invalid_interpreter", "LAOS_PYTHON_EXECUTABLE must be an absolute path"),
+  );
 });
 
 test("rejects invalid marker, noncanonical adapter/interpreter, temporary or synced state and root overlap", async (t) => {
@@ -316,13 +329,26 @@ test("rejects invalid marker, noncanonical adapter/interpreter, temporary or syn
   const executableLink = await fixture(t);
   const executable = path.join(executableLink.base, "python-link");
   await symlink(process.execPath, executable);
-  await assert.rejects(bridge(executableLink, { env: { LAOS_PYTHON_EXECUTABLE: executable } }), /configuration/iu);
+  await assert.rejects(
+    bridge(executableLink, { env: { LAOS_PYTHON_EXECUTABLE: executable } }),
+    checkpointConfigurationError,
+  );
 
   const nonExecutable = await fixture(t);
   const plain = path.join(nonExecutable.base, "python");
   await writeFile(plain, "#!/bin/sh\n", "utf8");
   await chmod(plain, 0o600);
-  await assert.rejects(bridge(nonExecutable, { env: { LAOS_PYTHON_EXECUTABLE: plain } }), /configuration/iu);
+  await assert.rejects(
+    bridge(nonExecutable, { env: { LAOS_PYTHON_EXECUTABLE: plain } }),
+    coreRunnerError("invalid_interpreter", "LAOS_PYTHON_EXECUTABLE is not executable"),
+  );
+
+  const noncanonicalExecutable = await fixture(t);
+  const noncanonicalPath = `${path.dirname(process.execPath)}/../${path.basename(path.dirname(process.execPath))}/${path.basename(process.execPath)}`;
+  await assert.rejects(
+    bridge(noncanonicalExecutable, { env: { LAOS_PYTHON_EXECUTABLE: noncanonicalPath } }),
+    checkpointConfigurationError,
+  );
 
   const temp = await fixture(t);
   const temporaryState = await mkdtemp(path.join(os.tmpdir(), "laos-checkpoint-state-"));

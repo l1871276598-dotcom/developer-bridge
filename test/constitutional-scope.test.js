@@ -15,6 +15,10 @@ const PROFILE = Object.freeze({
   project: "laos",
   confidentiality: "personal",
 });
+const PYTHON_EXECUTABLE = (
+  typeof process.env.LAOS_PYTHON_EXECUTABLE === "string" &&
+  path.isAbsolute(process.env.LAOS_PYTHON_EXECUTABLE)
+) ? process.env.LAOS_PYTHON_EXECUTABLE : process.execPath;
 
 async function git(cwd, ...args) {
   return execFileAsync("git", args, { cwd });
@@ -50,6 +54,7 @@ async function createBridge(item) {
       LAOS_CORE_ROOT: item.coreRoot,
       LAOS_DATA_ROOT: item.dataRoot,
       LAOS_STATE_DIR: item.stateDir,
+      LAOS_PYTHON_EXECUTABLE: PYTHON_EXECUTABLE,
       LAOS_CHECKPOINT_WORKSPACE: PROFILE.workspace,
       LAOS_CHECKPOINT_PROJECT: PROFILE.project,
       LAOS_CHECKPOINT_CONFIDENTIALITY: PROFILE.confidentiality,
@@ -97,6 +102,7 @@ test("C-INV-13: same-scope caller values are normalized to the trusted profile",
       LAOS_CORE_ROOT: item.coreRoot,
       LAOS_DATA_ROOT: item.dataRoot,
       LAOS_STATE_DIR: item.stateDir,
+      LAOS_PYTHON_EXECUTABLE: PYTHON_EXECUTABLE,
       LAOS_CHECKPOINT_WORKSPACE: PROFILE.workspace,
       LAOS_CHECKPOINT_PROJECT: PROFILE.project,
       LAOS_CHECKPOINT_CONFIDENTIALITY: PROFILE.confidentiality,
@@ -131,6 +137,7 @@ test("C-INV-13: scope-bearing task with omitted scope is injected from the profi
       LAOS_CORE_ROOT: item.coreRoot,
       LAOS_DATA_ROOT: item.dataRoot,
       LAOS_STATE_DIR: item.stateDir,
+      LAOS_PYTHON_EXECUTABLE: PYTHON_EXECUTABLE,
       LAOS_CHECKPOINT_WORKSPACE: PROFILE.workspace,
       LAOS_CHECKPOINT_PROJECT: PROFILE.project,
       LAOS_CHECKPOINT_CONFIDENTIALITY: PROFILE.confidentiality,
@@ -160,6 +167,7 @@ test("C-INV-13: fail-closed when the Bridge profile is absent", async (t) => {
       LAOS_CORE_ROOT: item.coreRoot,
       LAOS_DATA_ROOT: item.dataRoot,
       LAOS_STATE_DIR: item.stateDir,
+      LAOS_PYTHON_EXECUTABLE: PYTHON_EXECUTABLE,
       // No LAOS_CHECKPOINT_WORKSPACE → no trusted scope.
     },
     laosRunCommand: async () => {

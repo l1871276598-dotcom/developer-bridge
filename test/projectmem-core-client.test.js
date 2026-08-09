@@ -21,7 +21,11 @@ const PROFILE = Object.freeze({
 });
 
 function runnerReturning(payload) {
-  return async (env, taskJson) => JSON.stringify(payload);
+  return {
+    async runCli(taskJson, options) {
+      return JSON.stringify(payload);
+    },
+  };
 }
 
 test("F-07: buildCoreClient requires a manifest and trusted profile", () => {
@@ -49,6 +53,8 @@ test("GP8-02: buildCoreClient rejects a manifest whose scope disagrees with the 
     () => buildCoreClient({ manifest: badProject, trustedProfile: PROFILE }),
     (e) => e instanceof CoreClientError && e.code === "scope_mismatch",
   );
+});
+
 test("GP9-03: an exact match in confidentiality ceiling constructs a valid client", () => {
   const ok = buildCoreClient({
     manifest: MANIFEST,
@@ -93,6 +99,8 @@ test("GP9-03: manifest confidentiality ceiling must match the trusted profile ex
     () => buildCoreClient({ manifest: missing, trustedProfile: PROFILE }),
     (e) => e instanceof CoreClientError && e.code === "scope_mismatch",
   );
+});
+
 test("GP9-03: an exact match in confidentiality ceiling constructs a valid client", () => {
   const ok = buildCoreClient({
     manifest: MANIFEST,
@@ -120,19 +128,31 @@ test("GP10-10: manifest ceiling rejects prototype-inherited keys (constructor/to
   }));
 });
 
-test("GP8-02: a matching manifest constructs a client bound to the trusted profile scope", () => {
+test("GP8-02: a matching manifest constructs a client bound to the trusted profile scope", async () => {
   let seenTask = null;
-  const runner = async (env, taskJson) => {
-    seenTask = JSON.parse(taskJson);
-    return JSON.stringify({ output: { text: "ctx" } });
+  const runner = {
+    async runCli(taskJson, options) {
+      seenTask = JSON.parse(taskJson);
+      return JSON.stringify({ output: { text: "ctx" } });
+    },
   };
   const client = buildCoreClient({ manifest: MANIFEST, trustedProfile: PROFILE, runner });
   assert.ok(client);
   // The scope in the emitted Core task must be the trusted profile's scope.
-  client.contextSha256("q").then(() => {
-    assert.equal(seenTask.input.workspace, PROFILE.workspace);
-    assert.equal(seenTask.input.project, PROFILE.project);
-  });
+  await client.contextSha256("q");
+  assert.equal(seenTask.input.workspace, PROFILE.workspace);
+  assert.equal(seenTask.input.project, PROFILE.project);
+});
+
+test("GP10-09: buildCoreClient rejects a plain function runner", () => {
+  assert.throws(
+    () => buildCoreClient({
+      manifest: MANIFEST,
+      trustedProfile: PROFILE,
+      runner: async (env, taskJson) => JSON.stringify({ output: { text: "ctx" } }),
+    }),
+    (e) => e instanceof CoreClientError && e.code === "core_unavailable",
+  );
 });
 
 test("F-07: searchHandles fails closed on unrecognized handle objects", async () => {
@@ -309,9 +329,11 @@ test("F-07: scope is bound at construction, not per call", async () => {
   const client = buildCoreClient({
     manifest: MANIFEST,
     trustedProfile: PROFILE,
-    runner: async (env, taskJson) => {
-      capturedTask = JSON.parse(taskJson);
-      return JSON.stringify({ output: { text: "x", results: [] } });
+    runner: {
+      async runCli(taskJson, options) {
+        capturedTask = JSON.parse(taskJson);
+        return JSON.stringify({ output: { text: "x", results: [] } });
+      },
     },
   });
   await client.searchHandles();

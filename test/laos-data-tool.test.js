@@ -92,7 +92,7 @@ test("conditionally exposes one LAOS memory task bound to external data and stat
   assert.deepEqual(JSON.parse(result.content[0].text), { ok: true, data_root: "[laos-data]" });
   assert.equal(calls.length, 1);
   // GP9-01: the trusted interpreter (absolute, verified path) is the command.
-  const expectedInterp = process.env.LAOS_PYTHON_EXECUTABLE || "/opt/homebrew/bin/python3";
+  const expectedInterp = await realpath(env(item).LAOS_PYTHON_EXECUTABLE);
   assert.equal(calls[0].command, expectedInterp);
   assert.equal(calls[0].options.cwd, item.coreRoot);
   assert.deepEqual(calls[0].args.slice(0, 5), [
@@ -108,6 +108,8 @@ test("conditionally exposes one LAOS memory task bound to external data and stat
   const forwarded = JSON.parse(calls[0].args[6]);
   assert.equal(forwarded.type, "memory.create");
   assert.equal(forwarded.workspace, "personal");
+  assert.equal(forwarded.project, "laos");
+  assert.equal(forwarded.confidentiality, "personal");
   assert.equal(forwarded.input.workspace, "personal");
   assert.equal(forwarded.input.project, "laos");
   assert.equal(forwarded.input.confidentiality, "personal");
@@ -206,6 +208,8 @@ print(json.dumps({"ok": True, "task_type": task["type"], "data_root": args.root,
   assert.deepEqual(JSON.parse(await readFile(path.join(item.dataRoot, "smoke-task.json"), "utf8")), {
     type: "memory.search",
     workspace: "personal",
+    project: "laos",
+    confidentiality: "personal",
     input: { query: "bridge smoke", workspace: "personal", project: "laos", confidentiality: "personal" },
   });
   assert.equal(await readFile(path.join(item.stateDir, "smoke-state.txt"), "utf8"), "ok\n");
