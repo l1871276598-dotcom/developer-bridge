@@ -195,12 +195,13 @@ export function buildCoreClient({ manifest, trustedProfile, env, runner } = {}) 
     throw new CoreClientError("scope_mismatch", "manifest confidentiality ceiling must match the trusted Bridge profile exactly");
   }
   // Authoritative scope comes from the trusted profile, never from the manifest.
-  // The runner is either the shared TrustedCoreRunner (has runCli) or a legacy
-  // (env, taskJson) function (tests / host override).
+  // GP10-09: no legacy runner fallback — TrustedCoreRunner.runCli is required.
   const run = runner?.runCli
     ? (taskJson) => runner.runCli(taskJson, {})
-    : (taskJson) => runner(env ?? process.env, taskJson);
-  const resolveEnv = env ?? process.env;
+    : null;
+  if (!run) {
+    throw new CoreClientError("core_unavailable", "projectmem client requires a TrustedCoreRunner");
+  }
 
   function checkCoreResponse(parsed, taskType) {
     if (!parsed || typeof parsed !== "object") {

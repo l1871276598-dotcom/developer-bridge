@@ -81,7 +81,11 @@ async function resolveInterpreter(env, codeRoot) {
   // → .../Python.framework/.../python3). Resolving through the symlink is safe as
   // long as the final realpath is NOT inside the writable workspace. The TCB
   // threat is an Agent-controlled shim under the workspace, not an OS symlink.
+  // Accept any valid file (regular file or symlink) that resolves to a real file.
   const info = await lstat(lexical).catch(() => null);
+  if (!info || (!info.isFile() && !info.isSymbolicLink())) {
+    fail("invalid_interpreter", "LAOS_PYTHON_EXECUTABLE must be a file");
+  }
   if (!info?.isFile() && !info?.isSymbolicLink()) {
     fail("invalid_interpreter", "LAOS_PYTHON_EXECUTABLE must be a file");
   }
@@ -149,12 +153,11 @@ export async function createCoreRunner({ env, codeRoot, runCommand = null }) {
   const coreRoot = await canonicalDirectory(env.LAOS_CORE_ROOT, "LAOS Core runtime");
   const dataRoot = env.LAOS_DATA_ROOT ? await canonicalDirectory(env.LAOS_DATA_ROOT, "LAOS data root") : null;
   const stateDir = env.LAOS_STATE_DIR ? await canonicalDirectory(env.LAOS_STATE_DIR, "LAOS state dir") : null;
-  // GP10-01 / GP10-03: the interpreter is always validated. When a custom
-  // runCommand is injected (host override / test seam), the interpreter must
-  // be resolverable but the host controls the child — the validation confirms
-  // the path is absolute and safe, but the test/host can still inject its own
-  // spawn logic. Production (no injected runner) goes through the full
-  // bounded spawn with sanitized env.
+  // GP10-01: the interpreter is always resolved from the environment.
+  // When LAOS_PYTHON_EXECUTABLE is set, it must be an absolute path, a real
+  // file, executable, and not inside the writable workspace. If unset,
+  // search PATH for the first matching "python3" binary and resolve its
+  // realpath — same containment check applies.
   const interpreter = await resolveInterpreter(env, codeRoot);
   const childEnv = {
     ...sanitizedCoreEnv(env, codeRoot),
@@ -246,8 +249,24 @@ export async function createCoreRunner({ env, codeRoot, runCommand = null }) {
       });
       timer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGTERM");
-        setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
+        // GP10-09: kill the entire process group so descendant processes cannot
+        // keep stdio handles open and prevent child.close from firing.
+        try {
+          // Use process.kill with the negative pid on posix to target the
+          // process group; on Windows fall back to child.kill.
+          const pid = child.pid;
+          if (pid && process.platform !== "win32") {
+            process.kill(-pid, "SIGTERM");
+            setTimeout(() => {
+              try { process.kill(-pid, "SIGKILL"); } catch (_) {}
+            }, 2_000).unref();
+          } else {
+            child.kill("SIGTERM");
+            setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
+          }
+        } catch (_) {
+          child.kill("SIGKILL");
+        }
       }, options.timeoutMs ?? TIMEOUT_MS);
       timer.unref();
     });

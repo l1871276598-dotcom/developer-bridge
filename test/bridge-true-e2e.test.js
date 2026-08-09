@@ -16,7 +16,7 @@ const operatorIdentity = Object.freeze({ id: "laos.e2e.test", type: "local-human
 // is configured to gate. The Bridge invokes Core via the LAOS CLI restricted
 // task interface (laos_memory_task).
 const CORE_ROOT = "/Users/user/projects/laos-ws/gpt";
-const PYTHON = process.env.LAOS_PYTHON_EXECUTABLE || "python3.11";
+const PYTHON = process.env.LAOS_PYTHON_EXECUTABLE || "/Users/user/.local/bin/python3.11";
 
 const PROFILE = Object.freeze({
   workspace: "personal",

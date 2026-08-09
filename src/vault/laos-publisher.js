@@ -109,7 +109,16 @@ export function runCli(env, taskJson, codeRoot, options = {}) {
  * dispatcher would forward, so behavior is identical to a live Bridge call.
  */
 export function buildLaosEvidencePublisher({ env, runner, codeRoot } = {}) {
-  const run = runner?.runCli ? runner.runCli.bind(runner) : runCli;
+  // GP10-09: the vault publisher always uses the shared TrustedCoreRunner's
+  // runCli (bounded, sanitized env, no ?. fallback to a bare spawn). The legacy
+  // runCli export is kept only for direct test compatibility with runCli tests
+  // that bypass the runner framework.
+  // If no runner is provided, construction fails rather than silently
+  // downgrading to a spawn that inherits process.env.
+  if (!runner || !runner.runCli) {
+    throw new Error("LAOS evidence publisher requires a TrustedCoreRunner");
+  }
+  const run = runner.runCli.bind(runner);
   const profileEnv = env ?? process.env;
   return async (input) => {
     const { task, expectedIdentity } = normalizeEvidenceIngress(
