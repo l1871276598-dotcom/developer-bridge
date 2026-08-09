@@ -107,11 +107,12 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
       type: "vault.read",
       input: { relative_path: relativePath },
     };
-    // Pass childEnv (with the frozen LAOS_VAULT_ROOT) as extraEnv so the vault
-    // child reads from the exact trusted root (GP4-01/GP6-01).
+    // Pass ONLY the frozen LAOS_VAULT_ROOT as an extra env field (GP10-01:
+    // field-level allowlist — the TrustedCoreRunner only permits LAOS_VAULT_ROOT
+    // and LAOS_STATE_DIR through extraEnv; all other keys are silently dropped).
     const stdout = await runner.runCli(JSON.stringify(task), {
       cwd: effectiveCodeRoot,
-      extraEnv: childEnv,
+      extraEnv: { LAOS_VAULT_ROOT: childEnv.LAOS_VAULT_ROOT },
     });
     let parsed;
     try {

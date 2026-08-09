@@ -34,10 +34,13 @@ export class CoreRunnerError extends Error {
 
 const TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
-// -I (isolated) would disable sys.path[0] script-dir insertion and break Core's
-// `import memory` from src/. Instead use -X utf8 + explicit PYTHONPATH pinned to
-// the immutable coreRoot/src (sanitized, never attacker-controlled).
-const PYTHON_ARGS = ["-X", "utf8"];
+// -s: no user site-packages. -E: ignore PYTHON* environment variables (they
+// are explicitly set in the sanitized child env via allowlist). -X utf8 forces
+// UTF-8 mode. Combined with explicit PYTHONPATH pinned to coreRoot/src and
+// sanitized env (no PYTHONSTARTUP/PYTHONHOME/PYTHONUSERBASE), this is the
+// tightest bootstrap; no environment can inject attacker-controlled modules
+// before Core import dispatch (GP10-01).
+const PYTHON_ARGS = ["-s", "-E", "-X", "utf8"];
 
 function fail(code, message) {
   throw new CoreRunnerError(code, message);
@@ -118,30 +121,41 @@ function sanitizedCoreEnv(env, codeRoot) {
     });
     safe.PATH = keep.join(sep);
   }
-  // Never inherit Python bootstrap that could load attacker modules.
+  // Never inherit Python bootstrap that could load attacker modules (GP10-01).
+  // These are explicitly deleted (not just omitted) so options.extraEnv cannot
+  // re-introduce them via spread.
   delete safe.PYTHONPATH;
   delete safe.PYTHONSTARTUP;
   delete safe.PYTHONUSERBASE;
   delete safe.PYTHONHOME;
   delete safe.PYTHONEXECUTABLE;
+  delete safe.PYTHONNOUSERSITE;
+  // Reject all dynamic-linker and Python env overrides.
+  for (const key of Object.keys(safe)) {
+    if (key.startsWith("LD_") || key.startsWith("DYLD_") || key.startsWith("PYTHON")) {
+      delete safe[key];
+    }
+  }
   safe.PYTHONUTF8 = "1";
   safe.PYTHONDONTWRITEBYTECODE = "1";
+  safe.PYTHONNOUSERSITE = "1";
   return safe;
 }
 
 /**
  * Resolve the trusted interpreter once per runner construction.
  */
-export async function createCoreRunner({ env, codeRoot, runCommand }) {
+export async function createCoreRunner({ env, codeRoot, runCommand = null }) {
   const coreRoot = await canonicalDirectory(env.LAOS_CORE_ROOT, "LAOS Core runtime");
-  const dataRoot = await canonicalDirectory(env.LAOS_DATA_ROOT, "LAOS data root");
-  const stateDir = await canonicalDirectory(env.LAOS_STATE_DIR, "LAOS state dir");
-  // When a custom runCommand is injected (host override / test seam), the host
-  // fully controls the child — no interpreter validation needed. Production
-  // (no injected runner) validates the interpreter into the TCB (GP9-01).
-  const interpreter = runCommand
-    ? (env.LAOS_PYTHON_EXECUTABLE || "python3")
-    : await resolveInterpreter(env, codeRoot);
+  const dataRoot = env.LAOS_DATA_ROOT ? await canonicalDirectory(env.LAOS_DATA_ROOT, "LAOS data root") : null;
+  const stateDir = env.LAOS_STATE_DIR ? await canonicalDirectory(env.LAOS_STATE_DIR, "LAOS state dir") : null;
+  // GP10-01 / GP10-03: the interpreter is always validated. When a custom
+  // runCommand is injected (host override / test seam), the interpreter must
+  // be resolverable but the host controls the child — the validation confirms
+  // the path is absolute and safe, but the test/host can still inject its own
+  // spawn logic. Production (no injected runner) goes through the full
+  // bounded spawn with sanitized env.
+  const interpreter = await resolveInterpreter(env, codeRoot);
   const childEnv = {
     ...sanitizedCoreEnv(env, codeRoot),
     LAOS_CORE_ROOT: coreRoot,
@@ -150,15 +164,39 @@ export async function createCoreRunner({ env, codeRoot, runCommand }) {
     // Pin the import path to the immutable runtime — never inherited PYTHONPATH.
     PYTHONPATH: path.join(coreRoot, "src"),
   };
+  // GP10-03: cache the construction-time workspace (used for interpreter
+  // containment) so call-time re-validation can compare against it.
+  const constructionCodeRoot = codeRoot;
   const baseArgs = [interpreter, ...PYTHON_ARGS];
 
   // Bounded spawn (GP7-04/GP8-03): timeout + output cap + always-drain pipes.
+  // GP10-01: the child env is the sanitized childEnv only — no extraEnv spread.
+  // The vault publisher passes the frozen LAOS_VAULT_ROOT as an extra field;
+  // options.extraEnv is a field-level allowlist: only well-known config keys
+  // (LAOS_VAULT_ROOT, LAOS_STATE_DIR) are permitted; PYTHON*, LD_*, DYLD_*, and
+  // PATH are always rejected.
+  const ALLOWED_EXTRA_ENV = new Set(["LAOS_VAULT_ROOT", "LAOS_STATE_DIR"]);
   function spawnBounded(pythonArgs, options = {}) {
     return new Promise((resolve, reject) => {
       const args = [...baseArgs, ...pythonArgs];
+      let childEnvFinal = { ...childEnv };
+      if (options.extraEnv && typeof options.extraEnv === "object") {
+        for (const key of Object.keys(options.extraEnv)) {
+          if (
+            ALLOWED_EXTRA_ENV.has(key) ||
+            // LAOS_CHECKPOINT_* are safe config values used by adapter.
+            key.startsWith("LAOS_CHECKPOINT_")
+          ) {
+            const value = options.extraEnv[key];
+            if (typeof value === "string") {
+              childEnvFinal[key] = value;
+            }
+          }
+        }
+      }
       const child = spawn(args[0], args.slice(1), {
         cwd: options.cwd ?? coreRoot,
-        env: { ...childEnv, ...(options.extraEnv ?? {}) },
+        env: childEnvFinal,
         shell: false,
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
@@ -226,7 +264,13 @@ export async function createCoreRunner({ env, codeRoot, runCommand }) {
       const cli = path.join(coreRoot, "src", "laos.py");
       const args = [cli, "--root", childEnv.LAOS_DATA_ROOT, "--state-dir", childEnv.LAOS_STATE_DIR, "--task-json", taskJson];
       if (runCommand) {
-        return runCommand(interpreter, args, { cwd: cwd ?? coreRoot, timeoutMs });
+        // Per-call re-validation of workspace vs interpreter containment
+        // (GP10-03). The construction-time workspace is cached; the current
+        // workspace from the call options must also not overlap.
+        if (options.cwd && overlaps(options.cwd, interpreter)) {
+          throw new CoreRunnerError("invalid_workspace", "writable workspace must not contain the Python interpreter");
+        }
+        return runCommand(interpreter, args, { cwd: options.cwd ?? coreRoot, timeoutMs: options.timeoutMs });
       }
       const stdout = await spawnBounded(args, { cwd, timeoutMs });
       return { stdout, exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
@@ -234,9 +278,19 @@ export async function createCoreRunner({ env, codeRoot, runCommand }) {
     // Raw stdout-returning runner for vault.read / evidence.publish. This is an
     // INTERNAL Bridge path — always uses the trusted bounded spawn with the
     // sanitized childEnv (LAOS_VAULT_ROOT etc.), NOT an injected test seam.
+    // GP10-03: codeRoot is re-validated per call — any workspace the caller
+    // passes must be separate from the verified interpreter.
     async runCli(taskJson, options = {}) {
       const cli = path.join(coreRoot, "src", "laos.py");
       const args = [cli, "--root", childEnv.LAOS_DATA_ROOT, "--state-dir", childEnv.LAOS_STATE_DIR, "--task-json", taskJson];
+      // Per-call re-validation of workspace vs interpreter containment.
+      // If the caller passes a current workspace that contains the
+      // interpreter, reject — a writable-workspace interpreter shim must
+      // never execute (GP10-03 / GP8-01). Construction-time validation is not
+      // sufficient because getCodeRoot() can change between calls.
+      if (options.cwd && overlaps(options.cwd, interpreter)) {
+        throw new CoreRunnerError("invalid_workspace", "writable workspace must not contain the Python interpreter");
+      }
       return spawnBounded(args, options);
     },
   };

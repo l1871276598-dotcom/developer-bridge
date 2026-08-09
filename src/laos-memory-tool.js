@@ -531,7 +531,7 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
   // (no PYTHONPATH/user-site, isolated mode, PATH stripped of the writable
   // workspace) + bounded spawn. Every Core child shares this one path.
   const { createCoreRunner } = await import("./core-runner.js");
-  const coreRunner = await createCoreRunner({ env, codeRoot: initialCodeRoot, runCommand: options.runCommand });
+  const coreRunner = await createCoreRunner({ env, codeRoot: initialCodeRoot, runCommand: options?.runCommand });
   const runner = coreRunner.runTask.bind(coreRunner);
 
   // Vault-owned evidence publisher (GP-01): injected by the host, or built

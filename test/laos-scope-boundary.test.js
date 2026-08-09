@@ -49,6 +49,7 @@ function env(item) {
     HOME: process.env.HOME,
     DEVELOPER_BRIDGE_CAPABILITY_PROFILE: "controlled-engineering-v1",
     LAOS_CORE_ROOT: item.coreRoot,
+    LAOS_PYTHON_EXECUTABLE: process.env.LAOS_PYTHON_EXECUTABLE || "/opt/homebrew/bin/python3",
     LAOS_DATA_ROOT: item.dataRoot,
     LAOS_STATE_DIR: item.stateDir,
     ...PROFILE,
