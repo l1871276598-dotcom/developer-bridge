@@ -61,6 +61,7 @@ async function main() {
 
   const { initProjectmem } = await import("../src/projectmem/index.js");
   const { buildCoreClient, CoreClientError } = await import("../src/projectmem/core-client.js");
+  const { createCoreRunner } = await import("../src/core-runner.js");
 
   const workspace = args.workspace ?? process.env.LAOS_CHECKPOINT_WORKSPACE;
   const project = args.project ?? process.env.LAOS_CHECKPOINT_PROJECT;
@@ -88,7 +89,17 @@ async function main() {
     project,
     confidentiality_ceiling: confidentialityCeiling,
   };
-  const client = buildCoreClient({ manifest, trustedProfile, env: process.env });
+  // The repo root is the current writable workspace for per-call interpreter
+  // revalidation; the runner's canonical Core root remains the execution cwd.
+  const currentWorkspace = path.resolve(args.repoRoot);
+  const runner = await createCoreRunner({ env: process.env, codeRoot: currentWorkspace });
+  const client = buildCoreClient({
+    manifest,
+    trustedProfile,
+    runner,
+    currentWorkspace,
+    coreRoot: runner.coreRoot,
+  });
   let contextSha256 = "";
   let handles = [];
   try {

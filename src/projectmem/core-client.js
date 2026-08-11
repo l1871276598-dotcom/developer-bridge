@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import path from "node:path";
 
 /**
  * Core context/search client for projectmem.
@@ -22,6 +23,10 @@ export class CoreClientError extends Error {
 // id and fails closed, as do whitespace, control characters, path separators,
 // and extra schema fields.
 const MEMORY_ID_RE = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/u;
+
+function isAbsolutePath(value) {
+  return typeof value === "string" && value.length > 0 && !value.includes("\0") && path.isAbsolute(value);
+}
 
 /**
  * Parse a Core memory.search result into a validated memory:<id> handle.
@@ -67,7 +72,11 @@ export function parseMemoryHandle(item) {
  * initProjectmem's reconcile cannot route a mis-scoped manifest into Core
  * through this client.
  */
-export function buildCoreClient({ manifest, trustedProfile, runner } = {}) {
+export function buildCoreClient(options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    throw new CoreClientError("core_invalid_execution", "projectmem execution options are required");
+  }
+  const { manifest, trustedProfile, runner, currentWorkspace, coreRoot } = options;
   if (!manifest || typeof manifest !== "object") {
     throw new CoreClientError("core_invalid_manifest", "projectmem manifest is required");
   }
@@ -114,7 +123,17 @@ export function buildCoreClient({ manifest, trustedProfile, runner } = {}) {
   if (!runner || typeof runner !== "object" || typeof runner.runCli !== "function") {
     throw new CoreClientError("core_unavailable", "projectmem client requires a TrustedCoreRunner");
   }
-  const run = (taskJson) => runner.runCli(taskJson, {});
+  if (!Object.hasOwn(options, "currentWorkspace") || !Object.hasOwn(options, "coreRoot")
+    || !isAbsolutePath(currentWorkspace) || !isAbsolutePath(coreRoot)) {
+    throw new CoreClientError("core_invalid_execution", "projectmem requires explicit absolute workspace and Core cwd");
+  }
+  if (runner.coreRoot !== undefined && runner.coreRoot !== coreRoot) {
+    throw new CoreClientError("core_invalid_execution", "projectmem Core cwd must match the TrustedCoreRunner root");
+  }
+  const run = (taskJson) => runner.runCli(taskJson, {
+    workspace: currentWorkspace,
+    cwd: coreRoot,
+  });
 
   function checkCoreResponse(parsed, taskType) {
     if (!parsed || typeof parsed !== "object") {

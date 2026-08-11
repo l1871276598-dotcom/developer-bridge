@@ -169,6 +169,40 @@ export async function createCoreRunner({ env, codeRoot, runCommand = null }) {
   };
   const baseArgs = [interpreter, ...PYTHON_ARGS];
 
+  // Both public runner shapes accept the same execution binding. The caller's
+  // current workspace is an identity used for per-call interpreter isolation;
+  // Core itself always runs from this runner's immutable canonical coreRoot.
+  // Keep all physical-path checks here so runTask and runCli cannot drift.
+  async function validateExecutionOptions(options) {
+    if (!options || typeof options !== "object" || Array.isArray(options)
+      || !Object.hasOwn(options, "workspace") || !Object.hasOwn(options, "cwd")) {
+      fail("invalid_workspace", "writable workspace and immutable Core cwd must be explicit own properties");
+    }
+    const { workspace, cwd } = options;
+    if (typeof workspace !== "string" || !workspace || workspace.includes("\0") || !path.isAbsolute(workspace)) {
+      fail("invalid_workspace", "writable workspace must be an absolute path");
+    }
+    const lexicalWorkspace = path.resolve(workspace);
+    if (lexicalWorkspace !== workspace) {
+      fail("invalid_workspace", "writable workspace must already be canonical");
+    }
+    const workspaceInfo = await lstat(lexicalWorkspace).catch(() => null);
+    if (!workspaceInfo?.isDirectory() || workspaceInfo.isSymbolicLink()) {
+      fail("invalid_workspace", "writable workspace must be a real directory (no symlink)");
+    }
+    const canonicalWorkspace = await realpath(lexicalWorkspace).catch(() => null);
+    if (canonicalWorkspace !== lexicalWorkspace) {
+      fail("invalid_workspace", "writable workspace must not traverse a symlink");
+    }
+    if (overlaps(canonicalWorkspace, interpreter)) {
+      fail("invalid_workspace", "writable workspace must not contain the Python interpreter");
+    }
+    if (typeof cwd !== "string" || !cwd || cwd !== coreRoot) {
+      fail("invalid_cwd", "Core cwd must equal this runner's canonical Core root");
+    }
+    return options;
+  }
+
   // Bounded spawn (GP7-04/GP8-03): timeout + output cap + always-drain pipes.
   // GP10-01: the child env is the sanitized childEnv only — no extraEnv spread.
   // The vault publisher passes the frozen LAOS_VAULT_ROOT as an extra field;
@@ -195,7 +229,7 @@ export async function createCoreRunner({ env, codeRoot, runCommand = null }) {
         }
       }
       const child = spawn(args[0], args.slice(1), {
-        cwd: options.cwd ?? coreRoot,
+        cwd: options.cwd,
         env: childEnvFinal,
         shell: false,
         windowsHide: true,
@@ -276,38 +310,26 @@ export async function createCoreRunner({ env, codeRoot, runCommand = null }) {
     // Task-shape runner compatible with the dispatcher's contract. When a
     // custom runCommand is injected (tests / host), it is called with the
     // (command, args) shape it expects; otherwise the bounded spawn runs.
-    async runTask(taskJson, { workspace, cwd, timeoutMs } = {}) {
+    async runTask(taskJson, options = {}) {
+      const execution = await validateExecutionOptions(options);
       const cli = path.join(coreRoot, "src", "laos.py");
       const args = [cli, "--root", childEnv.LAOS_DATA_ROOT, "--state-dir", childEnv.LAOS_STATE_DIR, "--task-json", taskJson];
-      if (typeof workspace !== "string" || !workspace || workspace.includes("\0") || !path.isAbsolute(workspace)) {
-        throw new CoreRunnerError("invalid_workspace", "writable workspace must be an absolute path");
-      }
-      if (overlaps(path.resolve(workspace), interpreter)) {
-        throw new CoreRunnerError("invalid_workspace", "writable workspace must not contain the Python interpreter");
-      }
       if (runCommand) {
-        return runCommand(interpreter, args, { cwd: cwd ?? coreRoot, timeoutMs });
+        return runCommand(interpreter, args, { cwd: execution.cwd, timeoutMs: execution.timeoutMs });
       }
-      const stdout = await spawnBounded(args, { cwd: cwd ?? coreRoot, timeoutMs });
+      const stdout = await spawnBounded(args, execution);
       return { stdout, exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
     },
     // Raw stdout-returning runner for vault.read / evidence.publish. This is an
     // INTERNAL Bridge path — always uses the trusted bounded spawn with the
     // sanitized childEnv (LAOS_VAULT_ROOT etc.), NOT an injected test seam.
-    // GP10-03: codeRoot is re-validated per call — any workspace the caller
-    // passes must be separate from the verified interpreter.
+    // GP10-03: the current workspace is re-validated per call — any workspace
+    // the caller passes must be separate from the verified interpreter.
     async runCli(taskJson, options = {}) {
+      const execution = await validateExecutionOptions(options);
       const cli = path.join(coreRoot, "src", "laos.py");
       const args = [cli, "--root", childEnv.LAOS_DATA_ROOT, "--state-dir", childEnv.LAOS_STATE_DIR, "--task-json", taskJson];
-      // Per-call re-validation of workspace vs interpreter containment.
-      // If the caller passes a current workspace that contains the
-      // interpreter, reject — a writable-workspace interpreter shim must
-      // never execute (GP10-03 / GP8-01). Construction-time validation is not
-      // sufficient because getCodeRoot() can change between calls.
-      if (options.cwd && overlaps(options.cwd, interpreter)) {
-        throw new CoreRunnerError("invalid_workspace", "writable workspace must not contain the Python interpreter");
-      }
-      return spawnBounded(args, options);
+      return spawnBounded(args, execution);
     },
   };
 }

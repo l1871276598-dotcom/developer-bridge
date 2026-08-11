@@ -64,9 +64,9 @@ test("GP8-01: Core runs from the immutable coreRoot, never the writable workspac
   let activeRoot = item.workspaceA;
   const receivedRoots = [];
   let publishCalls = 0;
-  const vaultPublish = async (input, codeRoot) => {
+  const vaultPublish = async (input, execution) => {
     publishCalls += 1;
-    receivedRoots.push(codeRoot);
+    receivedRoots.push(execution);
     return {
       canonical_identity: "vault-note:test@x",
       note_id: "test",
@@ -82,12 +82,16 @@ test("GP8-01: Core runs from the immutable coreRoot, never the writable workspac
   const tool = await createLaosMemoryTool(env(item), () => activeRoot, { vaultPublish });
   assert.ok(tool, "tool should be constructed");
 
-  // Call 1: publisher receives the immutable coreRoot, NOT workspace A.
+  // Call 1: publisher receives workspace A for revalidation and the immutable
+  // Core root as its execution cwd.
   await tool.call({
     task: { type: "vault.snapshot.publish", workspace: "personal", input: { relative_path: "P/t.md" } },
   });
   assert.equal(publishCalls, 1);
-  assert.equal(receivedRoots[0], item.coreRoot, "Core runs from the immutable runtime root");
+  assert.deepEqual(receivedRoots[0], {
+    workspace: item.workspaceA,
+    cwd: item.coreRoot,
+  }, "publisher receives current workspace and immutable Core execution root");
 
   // Swap the authorized workspace to B — Core execution must NOT move.
   activeRoot = item.workspaceB;
@@ -96,8 +100,11 @@ test("GP8-01: Core runs from the immutable coreRoot, never the writable workspac
     task: { type: "vault.snapshot.publish", workspace: "personal", input: { relative_path: "P/t.md" } },
   });
   assert.equal(publishCalls, 2);
-  assert.equal(receivedRoots[1], item.coreRoot, "Core still runs from the immutable runtime root");
-  assert.equal(receivedRoots[1], receivedRoots[0], "workspace swap never changes Core execution root");
+  assert.deepEqual(receivedRoots[1], {
+    workspace: item.workspaceB,
+    cwd: item.coreRoot,
+  }, "publisher receives the new current workspace while Core cwd stays immutable");
+  assert.equal(receivedRoots[1].cwd, receivedRoots[0].cwd, "workspace swap never changes Core execution root");
 });
 
 // GP7-04: runCli is a bounded spawn — a hung Core child is killed via the

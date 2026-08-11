@@ -43,7 +43,7 @@ export async function loadVaultConfig(env) {
   return parsed;
 }
 
-export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
+export async function buildEnvVaultPublisher(env, { coreRoot, codeRoot, runner } = {}) {
   const config = await loadVaultConfig(env);
   if (!config) return null;
   const root = await resolveVaultRoot(config.vault.root);
@@ -54,13 +54,13 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
   // Vault B content under Vault A partition/confidentiality semantics. Like
   // "not configured", a mismatch makes vault evidence UNAVAILABLE (returns
   // null) rather than crashing the whole tool.
-  const coreRoot = env.LAOS_VAULT_ROOT;
-  if (typeof coreRoot !== "string" || coreRoot.length === 0) {
+  const configuredVaultRoot = env.LAOS_VAULT_ROOT;
+  if (typeof configuredVaultRoot !== "string" || configuredVaultRoot.length === 0) {
     return null;
   }
   let canonicalCoreRoot;
   try {
-    canonicalCoreRoot = await resolveVaultRoot(coreRoot);
+    canonicalCoreRoot = await resolveVaultRoot(configuredVaultRoot);
   } catch {
     return null;
   }
@@ -82,17 +82,38 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
   if (workspace !== "personal" && workspace !== "work") return null;
   if (!project) return null;
   const profile = { workspace, project, confidentiality_ceiling: ceiling };
+  // `codeRoot` is retained as a factory-input alias for existing callers. It
+  // always meant the trusted Core runtime here; call-time workspace identity is
+  // supplied separately for every request below.
+  const immutableCoreRoot = coreRoot ?? codeRoot ?? runner?.coreRoot;
+  if (typeof immutableCoreRoot !== "string" || !immutableCoreRoot) return null;
+
+  function executionOptions(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || !Object.hasOwn(value, "workspace") || !Object.hasOwn(value, "cwd")) {
+      const error = new Error("vault publisher requires a workspace and immutable Core cwd");
+      error.code = "invalid_workspace";
+      throw error;
+    }
+    if (value.cwd !== immutableCoreRoot) {
+      const error = new Error("vault publisher must execute from the immutable Core runtime");
+      error.code = "invalid_workspace";
+      throw error;
+    }
+    return { workspace: value.workspace, cwd: immutableCoreRoot };
+  }
 
   // The evidence.publish forwarding uses the shared TrustedCoreRunner (GP9-01):
   // the same bounded spawn + verified interpreter + sanitized env as every
   // other Core child. childEnv carries the frozen verified root.
-  // GP7-02: the codeRoot is resolved PER CALL — a workspace swap between
-  // construction and this request must not run Core from the stale workspace.
-  const publish = async (evidenceInput, effectiveCodeRoot) => {
+  // GP12-01: the current workspace is supplied per call, so a workspace swap
+  // between construction and this request cannot bypass interpreter checks.
+  const publish = async (evidenceInput, execution) => {
     const { buildLaosEvidencePublisher } = await import("./laos-publisher.js");
     const publisher = buildLaosEvidencePublisher({
       env: childEnv,
-      codeRoot: effectiveCodeRoot,
+      workspace: execution.workspace,
+      cwd: execution.cwd,
       runner,
     });
     return publisher(evidenceInput);
@@ -102,7 +123,7 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
   // runner invokes the Core CLI restricted task interface. GP4-01: the caller
   // (and the Bridge) never supply vault_root — Core derives it from its own
   // administrator config (LAOS_VAULT_ROOT). The task carries only relative_path.
-  const vaultRead = async (relativePath, effectiveCodeRoot) => {
+  const vaultRead = async (relativePath, execution) => {
     const task = {
       type: "vault.read",
       input: { relative_path: relativePath },
@@ -111,7 +132,8 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
     // field-level allowlist — the TrustedCoreRunner only permits LAOS_VAULT_ROOT
     // and LAOS_STATE_DIR through extraEnv; all other keys are silently dropped).
     const stdout = await runner.runCli(JSON.stringify(task), {
-      cwd: effectiveCodeRoot,
+      workspace: execution.workspace,
+      cwd: execution.cwd,
       extraEnv: { LAOS_VAULT_ROOT: childEnv.LAOS_VAULT_ROOT },
     });
     let parsed;
@@ -136,11 +158,9 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
     return content;
   };
 
-  // GP7-02: codeRoot is resolved per request by the dispatcher (the currently
-  // validated authorized workspace), so a workspace swap can never run Core
-  // from a stale captured root. The construction-time codeRoot is only a
-  // fallback for direct non-dispatcher callers.
-  return async (input, effectiveCodeRoot) => {
+  // GP12-01: the dispatcher supplies the current validated workspace per
+  // request, while this factory preserves the immutable Core execution cwd.
+  return async (input, execution) => {
     // input is { relative_path } — the only caller-supplied field (Phase 1).
     if (!input || typeof input !== "object" || typeof input.relative_path !== "string") {
       const error = new Error("vault snapshot requires relative_path");
@@ -148,14 +168,14 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
       throw error;
     }
     const noteRelativePath = input.relative_path;
-    const runCodeRoot = effectiveCodeRoot ?? codeRoot;
+    const runOptions = executionOptions(execution);
 
     // fd-rooted vault read via Core (S8/GP3-01): the returned bytes are the
     // note content as read from the fd chain rooted at the trusted vault root.
     // The relative path Core validated is the same reject-all string, so the
     // read object, partition, and identity describe the same canonical note
     // (GP2-02).
-    const raw = await vaultRead(noteRelativePath, runCodeRoot);
+    const raw = await vaultRead(noteRelativePath, runOptions);
     const partition = resolvePartition(map, noteRelativePath);
     const confirmed = verifyScope(partition, profile);
     const { identity, input: snapshotInput } = buildCanonicalNoteSnapshot(raw, noteRelativePath, partition);
@@ -172,7 +192,7 @@ export async function buildEnvVaultPublisher(env, { codeRoot, runner } = {}) {
       project: confirmed.project,
       confidentiality: profile.confidentiality_ceiling,
     };
-    const coreResult = await publish(evidenceInput, runCodeRoot);
+    const coreResult = await publish(evidenceInput, runOptions);
     return {
       canonical_identity: identity.canonical_identity,
       note_id: identity.note_id,

@@ -63,6 +63,7 @@ async function main() {
   const { publishNote, errorCode, errorMessage } = await import("../src/vault/vault-evidence.js");
   const { buildLaosEvidencePublisher } = await import("../src/vault/laos-publisher.js");
   const { loadConfig } = await import("../src/vault/vault-evidence.js");
+  const { createCoreRunner } = await import("../src/core-runner.js");
 
   const configPath = args.config ?? process.env.VAULT_EVIDENCE_CONFIG;
   if (!configPath) {
@@ -75,14 +76,25 @@ async function main() {
     process.stderr.write("Bridge profile incomplete: set LAOS_CHECKPOINT_WORKSPACE and LAOS_CHECKPOINT_PROJECT\n");
     return 2;
   }
-  const publishEvidence = buildLaosEvidencePublisher({ env: process.env });
+  const workspaceRoot = args.workspaceRoot ?? config.workspace_root ?? null;
+  // The requested/configured workspace is the call-time identity when present;
+  // otherwise the CLI's current directory is the only available workspace.
+  // Either way, Core executes from the runner's immutable canonical root.
+  const currentWorkspace = path.resolve(workspaceRoot ?? process.cwd());
+  const runner = await createCoreRunner({ env: process.env, codeRoot: currentWorkspace });
+  const publishEvidence = buildLaosEvidencePublisher({
+    env: process.env,
+    runner,
+    workspace: currentWorkspace,
+    cwd: runner.coreRoot,
+  });
 
   try {
     const result = await publishNote({
       config,
       profile,
       noteRelativePath: args.note,
-      workspaceRoot: args.workspaceRoot ?? config.workspace_root ?? null,
+      workspaceRoot,
       publishEvidence,
     });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

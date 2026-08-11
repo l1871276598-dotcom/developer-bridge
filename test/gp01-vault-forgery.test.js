@@ -8,6 +8,8 @@ import { promisify } from "node:util";
 
 import { createBridgeWithSyncTools } from "../src/bridge-with-sync-tools.js";
 import { FROZEN_LAOS_TASKS, ALLOWED_LAOS_TASKS } from "../src/laos-memory-tool.js";
+import { buildEnvVaultPublisher } from "../src/vault/env-publisher.js";
+import { buildLaosEvidencePublisher } from "../src/vault/laos-publisher.js";
 
 const execFileAsync = promisify(execFile);
 const operatorIdentity = Object.freeze({ id: "laos.gp01.test", type: "local-human" });
@@ -211,4 +213,105 @@ test("T5: legitimate vault note publishes to an artifact via the vault-owned pat
   const parsed = JSON.parse(result.content[0].text);
   assert.ok(parsed.source_ref.startsWith("artifact:"));
   assert.equal(parsed.note_id, "gp01-note-001");
+});
+
+test("GP12-01: vault.snapshot.publish forwards current workspace separately from immutable Core cwd", async (t) => {
+  const item = await fixture(t);
+  let execution = null;
+  const bridge = await createBridge(item, {
+    vaultPublish: async (_input, options) => {
+      execution = options;
+      return {
+        canonical_identity: "vault-note:gp12-01@placeholder",
+        note_id: "gp12-01",
+        source_sha256: "0".repeat(64),
+        identity_state: "front_matter",
+        source_ref: "artifact:gp12-01",
+        artifact_sha256: "gp12-01",
+        payload_sha256: "0".repeat(64),
+        partition: { workspace: "personal", project: "laos", confidentiality: "personal" },
+      };
+    },
+  });
+
+  const result = await bridge.callTool("laos_memory_task", {
+    task: { type: "vault.snapshot.publish", input: { relative_path: "01-Projects/LAOS/design.md" } },
+  });
+
+  assert.equal(result.isError, undefined, result.content?.[0]?.text);
+  assert.deepEqual(execution, { workspace: item.workspace, cwd: item.coreRoot });
+});
+
+test("GP12-01: the environment Vault publisher preserves both execution values through vault.read and evidence.publish", async (t) => {
+  const item = await fixture(t);
+  const calls = [];
+  const runner = {
+    async runCli(taskJson, options) {
+      const task = JSON.parse(taskJson);
+      calls.push({ type: task.type, options });
+      if (task.type === "vault.read") {
+        return JSON.stringify({ output: { content: item.noteContent } });
+      }
+      return JSON.stringify({
+        output: {
+          source_ref: "artifact:gp12-01",
+          artifact_sha256: "gp12-01",
+          canonical_identity: `vault-note:${task.input.source.note_id}@${task.input.source.source_sha256}`,
+          source_sha256: task.input.source.source_sha256,
+          payload_sha256: task.input.payload_sha256,
+        },
+      });
+    },
+  };
+  const publisher = await buildEnvVaultPublisher(env(item), { coreRoot: item.coreRoot, runner });
+
+  const result = await publisher(
+    { relative_path: "01-Projects/LAOS/design.md" },
+    { workspace: item.workspace, cwd: item.coreRoot },
+  );
+
+  assert.equal(result.source_ref, "artifact:gp12-01");
+  assert.deepEqual(calls, [
+    {
+      type: "vault.read",
+      options: {
+        workspace: item.workspace,
+        cwd: item.coreRoot,
+        extraEnv: { LAOS_VAULT_ROOT: item.vault },
+      },
+    },
+    {
+      type: "evidence.publish",
+      options: { workspace: item.workspace, cwd: item.coreRoot },
+    },
+  ]);
+});
+
+test("GP12-01: raw evidence publisher requires an explicit workspace and immutable Core cwd", () => {
+  const workspace = "/current-workspace";
+  const coreRoot = "/immutable-core-runtime";
+  const runner = {
+    coreRoot,
+    async runCli() {
+      return JSON.stringify({ output: { source_ref: "artifact:gp12-01" } });
+    },
+  };
+  const base = { env: {}, runner };
+
+  assert.throws(() => buildLaosEvidencePublisher({ ...base, cwd: coreRoot }), Error);
+  assert.throws(() => buildLaosEvidencePublisher({ ...base, workspace }), Error);
+  assert.throws(
+    () => buildLaosEvidencePublisher({ ...base, workspace, cwd: coreRoot, codeRoot: "/conflicting-core" }),
+    Error,
+  );
+  assert.throws(
+    () => buildLaosEvidencePublisher({ ...base, workspace, cwd: "/caller-selected-core" }),
+    Error,
+  );
+  assert.throws(
+    () => buildLaosEvidencePublisher({ ...base, workspace: "relative-workspace", cwd: coreRoot }),
+    Error,
+  );
+  assert.doesNotThrow(() => buildLaosEvidencePublisher({ ...base, workspace, cwd: coreRoot }));
+  assert.doesNotThrow(() => buildLaosEvidencePublisher({ ...base, workspace, codeRoot: coreRoot }));
 });

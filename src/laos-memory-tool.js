@@ -542,7 +542,7 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
   let vaultPublish = options.vaultPublish;
   if (!vaultPublish) {
     const { buildEnvVaultPublisher } = await import("./vault/env-publisher.js");
-    vaultPublish = await buildEnvVaultPublisher(env, { codeRoot: coreRoot, runner: coreRunner });
+    vaultPublish = await buildEnvVaultPublisher(env, { coreRoot, runner: coreRunner });
   }
 
   return Object.freeze({
@@ -568,7 +568,7 @@ export async function createLaosMemoryTool(env, getCodeRoot, options = {}) {
         if (!vaultPublish) {
           fail("vault_unavailable", { message: "Vault evidence publishing is not configured" });
         }
-        const payload = await vaultPublish(input, coreRoot);
+        const payload = await vaultPublish(input, { workspace: codeRoot, cwd: coreRoot });
         return {
           text: JSON.stringify(redact(payload, [
             [codeRoot, "[workspace]"],

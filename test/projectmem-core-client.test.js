@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildCoreClient, CoreClientError } from "../src/projectmem/core-client.js";
+import { buildCoreClient as buildCoreClientRaw, CoreClientError } from "../src/projectmem/core-client.js";
 
 const MANIFEST = Object.freeze({
   schema: "laos-projectmem/v1",
@@ -19,6 +19,19 @@ const PROFILE = Object.freeze({
   project: "laos",
   confidentiality_ceiling: "internal",
 });
+
+// Most pre-GP12 tests exercise Projectmem response and scope behavior rather
+// than construction of its execution binding. Keep those tests focused while
+// the GP12-specific raw-factory test below verifies that callers cannot omit
+// either independently trusted execution value.
+const EXECUTION = Object.freeze({
+  currentWorkspace: "/current-workspace",
+  coreRoot: "/immutable-core-runtime",
+});
+
+function buildCoreClient(options = {}) {
+  return buildCoreClientRaw({ ...EXECUTION, ...options });
+}
 
 function runnerReturning(payload) {
   return {
@@ -341,4 +354,62 @@ test("F-07: scope is bound at construction, not per call", async () => {
   assert.equal(capturedTask.input.project, "laos");
   await client.contextSha256("q");
   assert.equal(capturedTask.input.workspace, "personal");
+});
+
+test("GP12-01: projectmem passes current workspace and immutable Core cwd to every runner call", async () => {
+  const calls = [];
+  const currentWorkspace = "/current-workspace";
+  const coreRoot = "/immutable-core-runtime";
+  const client = buildCoreClient({
+    manifest: MANIFEST,
+    trustedProfile: PROFILE,
+    currentWorkspace,
+    coreRoot,
+    runner: {
+      async runCli(taskJson, options) {
+        calls.push({ task: JSON.parse(taskJson).type, options });
+        return JSON.stringify({ output: { text: "context", results: [] } });
+      },
+    },
+  });
+
+  await client.contextSha256("query");
+  await client.searchHandles();
+
+  assert.deepEqual(calls, [
+    { task: "context.build", options: { workspace: currentWorkspace, cwd: coreRoot } },
+    { task: "memory.search", options: { workspace: currentWorkspace, cwd: coreRoot } },
+  ]);
+});
+
+test("GP12-01: raw projectmem construction requires own canonical execution values", () => {
+  const runner = {
+    coreRoot: EXECUTION.coreRoot,
+    async runCli() {
+      return JSON.stringify({ output: { text: "context", results: [] } });
+    },
+  };
+  const base = {
+    manifest: MANIFEST,
+    trustedProfile: PROFILE,
+    runner,
+  };
+
+  assert.throws(
+    () => buildCoreClientRaw({ ...base, coreRoot: EXECUTION.coreRoot }),
+    CoreClientError,
+  );
+  assert.throws(
+    () => buildCoreClientRaw({ ...base, currentWorkspace: EXECUTION.currentWorkspace }),
+    CoreClientError,
+  );
+  assert.throws(
+    () => buildCoreClientRaw({ ...base, ...EXECUTION, coreRoot: "/caller-selected-core" }),
+    CoreClientError,
+  );
+  assert.throws(
+    () => buildCoreClientRaw({ ...base, ...EXECUTION, currentWorkspace: "relative-workspace" }),
+    CoreClientError,
+  );
+  assert.doesNotThrow(() => buildCoreClientRaw({ ...base, ...EXECUTION }));
 });

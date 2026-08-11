@@ -6,6 +6,10 @@ import { normalizeEvidenceIngress } from "../laos-memory-tool.js";
 const RUNCLI_TIMEOUT_MS = 120_000;
 const RUNCLI_MAX_OUTPUT_BYTES = 1024 * 1024;
 
+function isAbsolutePath(value) {
+  return typeof value === "string" && value.length > 0 && !value.includes("\0") && path.isAbsolute(value);
+}
+
 /**
  * evidence.publish invocation through the LAOS CLI — the same task shape the
  * laos_memory_task dispatcher produces. Every production evidence ingress goes
@@ -108,15 +112,40 @@ export function runCli(env, taskJson, codeRoot, options = {}) {
  * the LAOS CLI.  The normalized task is the exact payload the laos_memory_task
  * dispatcher would forward, so behavior is identical to a live Bridge call.
  */
-export function buildLaosEvidencePublisher({ env, runner, codeRoot } = {}) {
+export function buildLaosEvidencePublisher(options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    throw new Error("LAOS evidence publisher requires execution options");
+  }
+  const { env, runner, workspace, cwd, codeRoot } = options;
   // GP10-09: the vault publisher always uses the shared TrustedCoreRunner's
   // runCli (bounded, sanitized env, no ?. fallback to a bare spawn). The legacy
   // runCli export is kept only for direct test compatibility with runCli tests
   // that bypass the runner framework.
   // If no runner is provided, construction fails rather than silently
   // downgrading to a spawn that inherits process.env.
-  if (!runner || !runner.runCli) {
+  if (!runner || typeof runner.runCli !== "function") {
     throw new Error("LAOS evidence publisher requires a TrustedCoreRunner");
+  }
+  const hasWorkspace = Object.hasOwn(options, "workspace");
+  const hasCwd = Object.hasOwn(options, "cwd");
+  const hasCodeRoot = Object.hasOwn(options, "codeRoot");
+  if (!hasWorkspace || !isAbsolutePath(workspace)) {
+    throw new Error("LAOS evidence publisher requires an explicit absolute workspace");
+  }
+  if (!hasCwd && !hasCodeRoot) {
+    throw new Error("LAOS evidence publisher requires an immutable Core cwd");
+  }
+  if ((hasCwd && !isAbsolutePath(cwd)) || (hasCodeRoot && !isAbsolutePath(codeRoot))) {
+    throw new Error("LAOS evidence publisher requires an absolute immutable Core cwd");
+  }
+  if (hasCwd && hasCodeRoot && cwd !== codeRoot) {
+    throw new Error("LAOS evidence publisher received conflicting Core cwd values");
+  }
+  // `codeRoot` remains a compatibility alias for the immutable execution cwd,
+  // never an implicit substitute for the current workspace.
+  const executionCwd = hasCwd ? cwd : codeRoot;
+  if (runner.coreRoot !== undefined && runner.coreRoot !== executionCwd) {
+    throw new Error("LAOS evidence publisher Core cwd must match the TrustedCoreRunner root");
   }
   const run = runner.runCli.bind(runner);
   const profileEnv = env ?? process.env;
@@ -125,7 +154,7 @@ export function buildLaosEvidencePublisher({ env, runner, codeRoot } = {}) {
       { type: "evidence.publish", input },
       profileEnv,
     );
-    const stdout = await run(JSON.stringify(task), { cwd: codeRoot });
+    const stdout = await run(JSON.stringify(task), { workspace, cwd: executionCwd });
     let parsed;
     try {
       parsed = JSON.parse(stdout);
