@@ -202,7 +202,10 @@ function parseScalar(raw) {
 export function parseFrontMatterYaml(text) {
   const lines = text.replace(/\r\n/gu, "\n").split("\n");
   const root = Object.create(null);
-  const stack = [{ indent: -1, obj: root }];
+  // Every non-root frame was opened by an explicit mapping parent. Its first
+  // child fixes the indentation level for its direct entries; a later deeper
+  // line therefore cannot be silently promoted into that mapping.
+  const stack = [{ indent: -1, obj: root, childIndent: null }];
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
@@ -220,16 +223,34 @@ export function parseFrontMatterYaml(text) {
     const content = line.slice(indent);
     const trimmed = content.trim();
 
+    // Select a container before parsing either a mapping or a sequence. Root
+    // entries must start in column zero; deeper indentation is legal only
+    // inside a previously opened explicit container, and all direct children
+    // of that container must use its established indentation.
+    while (stack.length > 1 && indent <= stack[stack.length - 1].indent) {
+      stack.pop();
+    }
+    const frame = stack[stack.length - 1];
+    if (stack.length === 1) {
+      if (indent !== 0) {
+        throw new YamlError("root mapping entries must not be indented");
+      }
+    } else if (frame.childIndent === null) {
+      frame.childIndent = indent;
+    } else if (indent !== frame.childIndent) {
+      throw new YamlError("deeper indentation requires an explicit parent container");
+    }
+    const container = frame.obj;
+
     if (trimmed.startsWith("- ")) {
       // Block sequence item under the current container.
-      const parent = stack[stack.length - 1].obj;
       const itemText = trimmed.slice(2);
-      if (!Array.isArray(parent)) {
+      if (!Array.isArray(container)) {
         throw new YamlError("block sequence item outside of a sequence");
       }
       rejectMergeKey(itemText);
       // Reject nested sequence-in-map structures for simplicity.
-      parent.push(parseScalar(itemText));
+      container.push(parseScalar(itemText));
       continue;
     }
 
@@ -250,11 +271,6 @@ export function parseFrontMatterYaml(text) {
     let valueText = content.slice(colonIdx + 1).trim();
     const isNested = valueText === "" || valueText.startsWith("#");
 
-    // Pop the stack back to the correct parent for this indent.
-    while (stack.length > 1 && indent <= stack[stack.length - 1].indent) {
-      stack.pop();
-    }
-    const container = stack[stack.length - 1].obj;
     if (!container || typeof container !== "object" || Array.isArray(container)) {
       throw new YamlError("mapping entry outside of a mapping");
     }
@@ -275,11 +291,11 @@ export function parseFrontMatterYaml(text) {
       const nextIndent = nextIndentMatch ? nextIndentMatch[1].length : -1;
       if (nextIndent > indent && nextLine.slice(nextIndent).trim().startsWith("- ")) {
         container[key] = [];
-        stack.push({ indent, obj: container[key] });
+        stack.push({ indent, obj: container[key], childIndent: null });
       } else {
         const childObj = Object.create(null);
         container[key] = childObj;
-        stack.push({ indent, obj: childObj });
+        stack.push({ indent, obj: childObj, childIndent: null });
       }
     } else {
       // Strip trailing comment (only when not inside quotes).

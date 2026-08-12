@@ -51,3 +51,22 @@ test("R11: rejects tab-indented lines", () => {
 test("R11: rejects a leading-tab directive-style line", () => {
   assert.throws(() => parseFrontMatterYaml("\t%YAML 1.2\nid: x\n"), { name: "YamlError" });
 });
+
+// GP10-07: an indentation increase is meaningful only immediately below an
+// explicit `key:` container.  A malformed root entry must not be silently
+// promoted into the root mapping and become a forged note id.
+for (const spaces of [1, 2, 3]) {
+  test(`GP10-07: rejects a ${spaces}-space orphan root mapping indentation`, () => {
+    assert.throws(
+      () => parseFrontMatterYaml(`title: safe\n${" ".repeat(spaces)}id: attacker\n`),
+      { name: "YamlError" },
+    );
+  });
+}
+
+test("GP10-07: rejects a deeper mapping indentation not opened by a parent container", () => {
+  assert.throws(
+    () => parseFrontMatterYaml("meta:\n  title: safe\n    id: attacker\n"),
+    { name: "YamlError" },
+  );
+});

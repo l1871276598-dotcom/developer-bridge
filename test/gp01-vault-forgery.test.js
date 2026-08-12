@@ -287,6 +287,48 @@ test("GP12-01: the environment Vault publisher preserves both execution values t
   ]);
 });
 
+test("GP10-08: the environment Vault publisher persists the actual verified note classification", async (t) => {
+  const item = await fixture(t);
+  await writeFile(path.join(item.base, "vault-config.json"), JSON.stringify({
+    vault: { root: item.vault },
+    partition_rules: [
+      { path_prefix: "01-Projects/LAOS", workspace: "personal", project: "laos", confidentiality: "public" },
+    ],
+  }));
+  let persistedInput = null;
+  const runner = {
+    async runCli(taskJson) {
+      const task = JSON.parse(taskJson);
+      if (task.type === "vault.read") {
+        return JSON.stringify({ output: { content: item.noteContent } });
+      }
+      persistedInput = task.input;
+      return JSON.stringify({
+        output: {
+          source_ref: "artifact:gp10-08",
+          artifact_sha256: "gp10-08",
+          canonical_identity: `vault-note:${task.input.source.note_id}@${task.input.source.source_sha256}`,
+          source_sha256: task.input.source.source_sha256,
+          payload_sha256: task.input.payload_sha256,
+        },
+      });
+    },
+  };
+  const publisher = await buildEnvVaultPublisher(
+    env(item, { LAOS_CHECKPOINT_CONFIDENTIALITY: "internal" }),
+    { coreRoot: item.coreRoot, runner },
+  );
+
+  const result = await publisher(
+    { relative_path: "01-Projects/LAOS/design.md" },
+    { workspace: item.workspace, cwd: item.coreRoot },
+  );
+
+  assert.equal(result.partition.confidentiality, "public");
+  assert.equal(persistedInput.confidentiality, "public");
+  assert.equal(persistedInput.confidentiality, result.partition.confidentiality);
+});
+
 test("GP12-01: raw evidence publisher requires an explicit workspace and immutable Core cwd", () => {
   const workspace = "/current-workspace";
   const coreRoot = "/immutable-core-runtime";

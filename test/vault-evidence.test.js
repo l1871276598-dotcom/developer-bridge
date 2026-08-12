@@ -192,6 +192,64 @@ test("verifyScope rejects scope injection and over-ceiling confidentiality (Test
   assert.throws(() => verifyScope({ ...partition, confidentiality: "restricted" }, PROFILE), (e) => e.code === "scope_exceeded");
 });
 
+// GP12-05: this exported boundary receives data from more than one adapter, so
+// it must accept only own, plain records with one of its two explicit partition
+// schemas.  In particular, prototype names must never be treated as rank keys.
+test("GP12-05: verifyScope rejects prototype-bearing, inherited, and extra scope schemas", () => {
+  const partition = { workspace: "personal", project: "laos", confidentiality: "internal" };
+  const profile = { workspace: "personal", project: "laos", confidentiality_ceiling: "internal" };
+  const inheritedPartition = Object.create(partition);
+  const inheritedProfile = Object.create(profile);
+  const exoticPartition = new (class Partition {
+    constructor() {
+      this.workspace = "personal";
+      this.project = "laos";
+      this.confidentiality = "internal";
+    }
+  })();
+
+  for (const value of [
+    [],
+    inheritedPartition,
+    { ...partition, extra: "forged" },
+    { workspace: "personal", project: "laos" },
+    exoticPartition,
+  ]) {
+    assert.throws(() => verifyScope(value, profile), (e) => e.code === "scope_mismatch");
+  }
+  for (const value of [
+    [],
+    inheritedProfile,
+    { ...profile, extra: "forged" },
+    { workspace: "personal", project: "laos" },
+    Object.create({ confidentiality_ceiling: "internal" }),
+  ]) {
+    assert.throws(() => verifyScope(partition, value), (e) => e.code === "invalid_profile");
+  }
+});
+
+test("GP12-05: verifyScope rejects inherited rank names and accepts the resolver partition schema", () => {
+  const partition = { workspace: "work", project: "p", confidentiality: "restricted" };
+  for (const ceiling of ["constructor", "toString", "__defineGetter__", "__proto__", "hasOwnProperty"]) {
+    assert.throws(
+      () => verifyScope(partition, { workspace: "work", project: "p", confidentiality_ceiling: ceiling }),
+      (e) => e.code === "invalid_profile",
+      ceiling,
+    );
+  }
+  const resolvedPartition = {
+    workspace: "personal",
+    project: "laos",
+    confidentiality: "internal",
+    path_prefix: "01-Projects/LAOS",
+  };
+  assert.deepEqual(verifyScope(resolvedPartition, PROFILE), {
+    workspace: "personal",
+    project: "laos",
+    confidentiality: "internal",
+  });
+});
+
 test("saveEvidenceHandle persists a handle to .projectmem/summaries/evidence.json", async (t) => {
   const { workspace } = await vaultFixture(t);
   const handle = { note_id: "abc123", artifact_ref: "artifact:zzz", source_identity: "vault-note:abc123@zzz" };

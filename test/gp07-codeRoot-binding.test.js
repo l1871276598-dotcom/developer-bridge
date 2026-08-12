@@ -11,6 +11,20 @@ import { runCli } from "../src/vault/laos-publisher.js";
 
 const execFileAsync = promisify(execFile);
 
+async function pythonExecutable() {
+  if (typeof process.env.LAOS_PYTHON_EXECUTABLE === "string"
+    && path.isAbsolute(process.env.LAOS_PYTHON_EXECUTABLE)
+    && !process.env.LAOS_PYTHON_EXECUTABLE.includes("\0")) {
+    return process.env.LAOS_PYTHON_EXECUTABLE;
+  }
+  const { stdout } = await execFileAsync("python3", ["-c", "import sys; print(sys.executable)"]);
+  const executable = stdout.trim();
+  if (!path.isAbsolute(executable)) throw new Error("python3 did not resolve to an absolute executable");
+  return executable;
+}
+
+const PYTHON_EXECUTABLE = await pythonExecutable();
+
 async function git(cwd, ...args) {
   return execFileAsync("git", args, { cwd });
 }
@@ -47,7 +61,7 @@ function env(item) {
     PATH: process.env.PATH,
     HOME: process.env.HOME,
     LAOS_CORE_ROOT: item.coreRoot,
-    LAOS_PYTHON_EXECUTABLE: process.env.LAOS_PYTHON_EXECUTABLE || "/opt/homebrew/bin/python3",
+    LAOS_PYTHON_EXECUTABLE: PYTHON_EXECUTABLE,
     LAOS_DATA_ROOT: item.dataRoot,
     LAOS_STATE_DIR: item.stateDir,
     LAOS_CHECKPOINT_WORKSPACE: "personal",
@@ -107,45 +121,25 @@ test("GP8-01: Core runs from the immutable coreRoot, never the writable workspac
   assert.equal(receivedRoots[1].cwd, receivedRoots[0].cwd, "workspace swap never changes Core execution root");
 });
 
-// GP7-04: runCli is a bounded spawn — a hung Core child is killed via the
-// timeout, and a chatty child is killed via the output cap, so a malicious
-// vault FIFO (or any unresponsive CLI) can never block the Bridge forever.
-function makeFakeCli(dir, body) {
-  // The fake "python" is a shell script named LAOS_PYTHON_EXECUTABLE.
-  const fake = path.join(dir, "fake-python.sh");
-  return writeFile(fake, `#!/bin/sh\n${body}\n`, { mode: 0o755 }).then(() => fake);
-}
-
-async function fakeWorkspace(base) {
-  const ws = path.join(base, "w");
-  await mkdir(path.join(ws, "src"), { recursive: true });
-  await writeFile(path.join(ws, "src", "laos.py"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  await git(ws, "init", "--quiet", "-b", "main");
-  await git(ws, "config", "user.name", "Test User");
-  await git(ws, "config", "user.email", "test@example.invalid");
-  await git(ws, "add", "src/laos.py");
-  await git(ws, "commit", "--quiet", "-m", "fixture");
-  return ws;
-}
-
 test("GP7-04: runCli kills a hung Core child (timeout, not forever)", async (t) => {
-  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "bridge-gp07-timeout-")));
-  t.after(() => rm(base, { recursive: true, force: true }));
-  const ws = await fakeWorkspace(base);
-  const fake = await makeFakeCli(base, "sleep 300");
-  const env = { LAOS_DATA_ROOT: "/tmp", LAOS_STATE_DIR: "/tmp", LAOS_PYTHON_EXECUTABLE: fake };
+  const item = await fixture(t);
+  await writeFile(path.join(item.coreRoot, "src", "laos.py"), "import time\ntime.sleep(300)\n", "utf8");
   const start = Date.now();
-  await assert.rejects(runCli(env, "{}", ws, { timeoutMs: 300 }), /timed out/i);
+  await assert.rejects(runCli(env(item), "{}", item.coreRoot, {
+    workspace: item.workspaceA,
+    cwd: item.coreRoot,
+    timeoutMs: 300,
+  }), /timed out/i);
   assert.ok(Date.now() - start < 5_000, "must not block for the full 300s sleep");
 });
 
 test("GP7-04: runCli kills a chatty Core child (output cap, no unbounded buffering)", async (t) => {
-  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "bridge-gp07-cap-")));
-  t.after(() => rm(base, { recursive: true, force: true }));
-  const ws = await fakeWorkspace(base);
-  const fake = await makeFakeCli(base, 'i=0; while [ $i -lt 800000 ]; do echo "x"; i=$((i+1)); done');
-  const env = { LAOS_DATA_ROOT: "/tmp", LAOS_STATE_DIR: "/tmp", LAOS_PYTHON_EXECUTABLE: fake };
-  await assert.rejects(runCli(env, "{}", ws), /output limit exceeded/i);
+  const item = await fixture(t);
+  await writeFile(path.join(item.coreRoot, "src", "laos.py"), "import sys\nsys.stdout.write('x' * 1_300_000)\nsys.stdout.flush()\n", "utf8");
+  await assert.rejects(runCli(env(item), "{}", item.coreRoot, {
+    workspace: item.workspaceA,
+    cwd: item.coreRoot,
+  }), /output limit exceeded/i);
 });
 test("GP8-01: a workspace swap to a non-directory fails closed before the publisher runs", async (t) => {
   const item = await fixture(t);

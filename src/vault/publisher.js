@@ -12,12 +12,19 @@ import path from "node:path";
  * (not a Core memory copy) under .projectmem/summaries/evidence.json.
  */
 
-const CONFIDENTIALITY_RANK = {
+const CONFIDENTIALITY_RANK = Object.freeze(Object.assign(Object.create(null), {
   public: 0,
   personal: 1,
   internal: 2,
   restricted: 3,
-};
+}));
+const PROFILE_KEYS = ["workspace", "project", "confidentiality_ceiling"];
+const PARTITION_KEY_SETS = [
+  ["workspace", "project", "confidentiality"],
+  // resolvePartition preserves its matched path prefix as trusted mapping
+  // metadata. It is the only non-scope field accepted at this boundary.
+  ["workspace", "project", "confidentiality", "path_prefix"],
+];
 
 export class PublisherError extends Error {
   constructor(code, message) {
@@ -31,14 +38,42 @@ function fail(code, message) {
   throw new PublisherError(code, message);
 }
 
+function isPlainRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+  } catch {
+    return false;
+  }
+}
+
+function hasExactOwnDataKeys(value, acceptedKeySets) {
+  if (!isPlainRecord(value)) return false;
+  try {
+    const ownKeys = Reflect.ownKeys(value);
+    return acceptedKeySets.some((expected) => {
+      if (ownKeys.length !== expected.length || !expected.every((key) => Object.hasOwn(value, key))) {
+        return false;
+      }
+      return expected.every((key) => {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        return Boolean(descriptor && Object.hasOwn(descriptor, "value") && descriptor.enumerable);
+      });
+    });
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Verify a partition against the Bridge profile.
  * profile: { workspace, project, confidentiality_ceiling }
  * Returns the confirmed scope (profile workspace/project + note confidentiality).
  */
 export function verifyScope(partition, profile) {
-  if (!profile || typeof profile !== "object") {
-    fail("invalid_profile", "Bridge profile is not configured");
+  if (!hasExactOwnDataKeys(profile, [PROFILE_KEYS])) {
+    fail("invalid_profile", "Bridge profile must be an exact plain scope record");
   }
   const { workspace, project, confidentiality_ceiling: ceiling } = profile;
   if (workspace !== "personal" && workspace !== "work") {
@@ -47,10 +82,24 @@ export function verifyScope(partition, profile) {
   if (typeof project !== "string" || project.length === 0) {
     fail("invalid_profile", "profile project is invalid");
   }
-  if (!(ceiling in CONFIDENTIALITY_RANK)) {
+  if (typeof ceiling !== "string" || !Object.hasOwn(CONFIDENTIALITY_RANK, ceiling)) {
     fail("invalid_profile", "profile confidentiality ceiling is invalid");
   }
 
+  if (!hasExactOwnDataKeys(partition, PARTITION_KEY_SETS)) {
+    fail("scope_mismatch", "note partition must be an exact plain scope record");
+  }
+  if (typeof partition.workspace !== "string" || typeof partition.project !== "string"
+    || typeof partition.confidentiality !== "string") {
+    fail("scope_mismatch", "note partition fields are invalid");
+  }
+  if (Object.hasOwn(partition, "path_prefix")
+    && (typeof partition.path_prefix !== "string" || partition.path_prefix.length === 0)) {
+    fail("scope_mismatch", "note partition path prefix is invalid");
+  }
+  if (!Object.hasOwn(CONFIDENTIALITY_RANK, partition.confidentiality)) {
+    fail("scope_mismatch", "note confidentiality is invalid");
+  }
   if (partition.workspace !== workspace) fail("scope_mismatch");
   if (partition.project !== project) fail("scope_mismatch");
   if (CONFIDENTIALITY_RANK[partition.confidentiality] > CONFIDENTIALITY_RANK[ceiling]) {

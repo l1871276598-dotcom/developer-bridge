@@ -10,7 +10,10 @@ import { FROZEN_LAOS_TASKS } from "../src/laos-memory-tool.js";
 // graph test over the Core agent registry + the documented internal dispatch
 // edges, not a human grep.
 
-const CORE_ROOT = "/Users/user/projects/laos-ws/gpt";
+const CORE_ROOT = process.env.LAOS_TEST_CORE_ROOT;
+if (typeof CORE_ROOT !== "string" || !path.isAbsolute(CORE_ROOT) || CORE_ROOT.includes("\0")) {
+  throw new Error("LAOS_TEST_CORE_ROOT must be an explicit absolute path for reachability tests");
+}
 const REGISTRY_PATH = path.join(CORE_ROOT, "src", "agents", "registry-v0.9.yaml");
 const CORE_SRC = path.join(CORE_ROOT, "src");
 

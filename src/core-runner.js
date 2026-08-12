@@ -34,6 +34,9 @@ export class CoreRunnerError extends Error {
 
 const TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
+const TERMINATION_GRACE_MS = 250;
+const PROCESS_TREE_EXIT_WATCHDOG_MS = 500;
+const PROCESS_TREE_EXIT_POLL_MS = 10;
 // -s: no user site-packages. -E: ignore PYTHON* environment variables (they
 // are explicitly set in the sanitized child env via allowlist). -X utf8 forces
 // UTF-8 mode. Combined with explicit PYTHONPATH pinned to coreRoot/src and
@@ -204,6 +207,9 @@ export async function createCoreRunner({ env, codeRoot, runCommand = null }) {
   }
 
   // Bounded spawn (GP7-04/GP8-03): timeout + output cap + always-drain pipes.
+  // On POSIX, detached spawn creates a new session/process group whose leader
+  // is the child pid. That makes negative-pid signalling an actual tree kill,
+  // instead of merely assuming an unrelated process group exists (GP13-01).
   // GP10-01: the child env is the sanitized childEnv only — no extraEnv spread.
   // The vault publisher passes the frozen LAOS_VAULT_ROOT as an extra field;
   // options.extraEnv is a field-level allowlist: only well-known config keys
@@ -211,6 +217,11 @@ export async function createCoreRunner({ env, codeRoot, runCommand = null }) {
   // PATH are always rejected.
   const ALLOWED_EXTRA_ENV = new Set(["LAOS_VAULT_ROOT", "LAOS_STATE_DIR"]);
   function spawnBounded(pythonArgs, options = {}) {
+    // Node has no dependency-free, awaitable tree-reaping primitive on Windows.
+    // Do not claim taskkill's fire-and-forget result as process-tree cleanup.
+    if (process.platform === "win32") {
+      fail("unsupported_platform", "LAOS Core runner requires POSIX process-group termination");
+    }
     return new Promise((resolve, reject) => {
       const args = [...baseArgs, ...pythonArgs];
       let childEnvFinal = { ...childEnv };
@@ -233,73 +244,140 @@ export async function createCoreRunner({ env, codeRoot, runCommand = null }) {
         env: childEnvFinal,
         shell: false,
         windowsHide: true,
+        detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
       const stdout = [];
       const stderr = [];
       let stdoutBytes = 0;
       let stderrBytes = 0;
-      let timedOut = false;
-      let outputLimitExceeded = false;
       let settled = false;
-      let timer;
+      let discardOutput = false;
+      let terminal = null;
+      let timeoutTimer;
+      let escalationTimer;
+      let treeExitTimer;
+      let treeExitDeadline = 0;
 
-      const finish = (error, value) => {
+      const finish = () => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
-        if (error) reject(error);
-        else resolve(value);
+        clearTimeout(timeoutTimer);
+        clearTimeout(escalationTimer);
+        clearTimeout(treeExitTimer);
+        // A descendant that retained a pipe must not keep a referenced handle
+        // alive after the bounded terminal result has been settled.
+        try { child.stdout.destroy(); } catch (_) {}
+        try { child.stderr.destroy(); } catch (_) {}
+        if (terminal.error) reject(terminal.error);
+        else resolve(terminal.value);
       };
+
+      const processGroupExists = () => {
+        const pid = child.pid;
+        if (!pid) return false;
+        try {
+          process.kill(-pid, 0);
+          return true;
+        } catch (error) {
+          // ESRCH proves the group is gone. Treat every other failure as live
+          // so a permission/race anomaly cannot be mistaken for cleanup.
+          return error?.code !== "ESRCH";
+        }
+      };
+
+      const signalProcessGroup = (signal) => {
+        const pid = child.pid;
+        if (!pid) return;
+        try {
+          // This is safe because the POSIX spawn above created a session with
+          // the child as process-group leader.
+          process.kill(-pid, signal);
+        } catch (_) {
+          // A concurrent leader exit can make the group disappear between the
+          // liveness probe and signal delivery. Direct-child fallback only
+          // covers that race; it is never the normal tree strategy.
+          try { child.kill(signal); } catch (_) {}
+        }
+      };
+
+      const waitForProcessGroupExit = () => {
+        if (!processGroupExists()) {
+          finish();
+          return;
+        }
+        if (Date.now() >= treeExitDeadline) {
+          // SIGKILL should make this unreachable for a descendant that stayed
+          // in the detached group. Do not resolve a normal result or report a
+          // timeout/output/exit outcome as clean when the tree still answers
+          // a liveness probe: that would be a false completion claim.
+          terminal = {
+            error: new CoreRunnerError("core_termination_failed", "LAOS CLI process tree termination could not be verified"),
+            value: undefined,
+          };
+          finish();
+          return;
+        }
+        treeExitTimer = setTimeout(waitForProcessGroupExit, PROCESS_TREE_EXIT_POLL_MS);
+      };
+
+      const beginProcessTreeCleanup = () => {
+        if (!processGroupExists()) {
+          finish();
+          return;
+        }
+        signalProcessGroup("SIGTERM");
+        escalationTimer = setTimeout(() => {
+          // Always make the bounded TERM -> KILL escalation, including after
+          // a normal direct-child close. The liveness poll avoids claiming the
+          // terminal result while a redirected-stdio descendant still exists.
+          signalProcessGroup("SIGKILL");
+          treeExitDeadline = Date.now() + PROCESS_TREE_EXIT_WATCHDOG_MS;
+          waitForProcessGroupExit();
+        }, TERMINATION_GRACE_MS);
+        // These timers deliberately remain referenced. Once cleanup has
+        // begun, a bare CLI caller may have no other live handles after the
+        // direct child exits; unref'ing them could let Node exit before the
+        // mandatory escalation and tree check run.
+      };
+
+      const beginTerminal = (error, value) => {
+        if (terminal) return;
+        terminal = { error, value };
+        // Continue draining pipe events but never buffer output after a cap,
+        // timeout, spawn error, or normal close; cleanup owns settlement now.
+        discardOutput = true;
+        clearTimeout(timeoutTimer);
+        beginProcessTreeCleanup();
+      };
+
       const collect = (target, chunk, isStdout) => {
+        if (discardOutput) return;
         if (isStdout) stdoutBytes += chunk.length;
         else stderrBytes += chunk.length;
         if (stdoutBytes > MAX_OUTPUT_BYTES || stderrBytes > MAX_OUTPUT_BYTES) {
-          outputLimitExceeded = true;
-          child.kill("SIGKILL");
+          beginTerminal(new CoreRunnerError("core_output_limit", "LAOS CLI output limit exceeded"));
+          return;
         }
         target.push(chunk);
       };
       child.stdout.on("data", (chunk) => collect(stdout, chunk, true));
       child.stderr.on("data", (chunk) => collect(stderr, chunk, false));
-      child.once("error", (error) => finish(error));
-      child.once("close", (code) => {
-        if (outputLimitExceeded) {
-          finish(new CoreRunnerError("core_output_limit", "LAOS CLI output limit exceeded"));
-          return;
-        }
-        if (timedOut) {
-          finish(new CoreRunnerError("core_timeout", "LAOS CLI timed out"));
-          return;
-        }
-        if (code !== 0) {
-          finish(new CoreRunnerError("core_exit", `LAOS CLI exited ${code}: ${Buffer.concat(stderr).toString("utf8").slice(0, 400)}`));
-          return;
-        }
-        finish(null, Buffer.concat(stdout).toString("utf8"));
+      child.once("error", (error) => {
+        beginTerminal(error);
       });
-      timer = setTimeout(() => {
-        timedOut = true;
-        // GP10-09: kill the entire process group so descendant processes cannot
-        // keep stdio handles open and prevent child.close from firing.
-        try {
-          // Use process.kill with the negative pid on posix to target the
-          // process group; on Windows fall back to child.kill.
-          const pid = child.pid;
-          if (pid && process.platform !== "win32") {
-            process.kill(-pid, "SIGTERM");
-            setTimeout(() => {
-              try { process.kill(-pid, "SIGKILL"); } catch (_) {}
-            }, 2_000).unref();
-          } else {
-            child.kill("SIGTERM");
-            setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
-          }
-        } catch (_) {
-          child.kill("SIGKILL");
+      child.once("close", (code) => {
+        if (terminal) return;
+        if (code !== 0) {
+          beginTerminal(new CoreRunnerError("core_exit", "LAOS CLI exited " + code + ": " + Buffer.concat(stderr).toString("utf8").slice(0, 400)));
+          return;
         }
+        beginTerminal(null, Buffer.concat(stdout).toString("utf8"));
+      });
+      timeoutTimer = setTimeout(() => {
+        beginTerminal(new CoreRunnerError("core_timeout", "LAOS CLI timed out"));
       }, options.timeoutMs ?? TIMEOUT_MS);
-      timer.unref();
+      timeoutTimer.unref();
     });
   }
 

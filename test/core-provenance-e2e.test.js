@@ -13,10 +13,18 @@ import { buildSnapshotFromRaw } from "../src/vault/snapshot.js";
 
 const execFileAsync = promisify(execFile);
 
-// The real LAOS Core checkout (ws-gpt worktree) with the LAOS CLI.
-const CORE_ROOT = "/Users/user/projects/laos-ws/gpt";
+function requiredAbsoluteEnv(name) {
+  const value = process.env[name];
+  if (typeof value !== "string" || !path.isAbsolute(value) || value.includes("\0")) {
+    throw new Error(name + " must be an explicit absolute path for real-Core tests");
+  }
+  return value;
+}
+
+// The real, explicitly configured Core checkout with the LAOS CLI.
+const CORE_ROOT = requiredAbsoluteEnv("LAOS_TEST_CORE_ROOT");
 const CLI = path.join(CORE_ROOT, "src", "laos.py");
-const PYTHON = process.env.LAOS_PYTHON_EXECUTABLE || "python3";
+const PYTHON = requiredAbsoluteEnv("LAOS_PYTHON_EXECUTABLE");
 
 const PROFILE = Object.freeze({
   workspace: "personal",

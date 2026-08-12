@@ -12,11 +12,18 @@ import { createBridgeWithSyncTools } from "../src/bridge-with-sync-tools.js";
 const execFileAsync = promisify(execFile);
 const operatorIdentity = Object.freeze({ id: "laos.e2e.test", type: "local-human" });
 
-// The real LAOS Core checkout (ws-gpt) — the authorized workspace the Bridge
-// is configured to gate. The Bridge invokes Core via the LAOS CLI restricted
-// task interface (laos_memory_task).
-const CORE_ROOT = "/Users/user/projects/laos-ws/gpt";
-const PYTHON = process.env.LAOS_PYTHON_EXECUTABLE || "/Users/user/.local/bin/python3.11";
+function requiredAbsoluteEnv(name) {
+  const value = process.env[name];
+  if (typeof value !== "string" || !path.isAbsolute(value) || value.includes("\0")) {
+    throw new Error(name + " must be an explicit absolute path for real-Core tests");
+  }
+  return value;
+}
+
+// The real, explicitly configured Core checkout — the authorized runtime the
+// Bridge invokes through the restricted laos_memory_task interface.
+const CORE_ROOT = requiredAbsoluteEnv("LAOS_TEST_CORE_ROOT");
+const PYTHON = requiredAbsoluteEnv("LAOS_PYTHON_EXECUTABLE");
 
 const PROFILE = Object.freeze({
   workspace: "personal",

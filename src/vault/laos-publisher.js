@@ -1,10 +1,7 @@
-import { spawn } from "node:child_process";
 import path from "node:path";
 
+import { createCoreRunner } from "../core-runner.js";
 import { normalizeEvidenceIngress } from "../laos-memory-tool.js";
-
-const RUNCLI_TIMEOUT_MS = 120_000;
-const RUNCLI_MAX_OUTPUT_BYTES = 1024 * 1024;
 
 function isAbsolutePath(value) {
   return typeof value === "string" && value.length > 0 && !value.includes("\0") && path.isAbsolute(value);
@@ -18,92 +15,31 @@ function isAbsolutePath(value) {
  * Bridge policy boundary (C-INV-16).
  */
 
-function findCli(codeRoot) {
-  // GP8-01: Core runs from the immutable LAOS_CORE_ROOT runtime, never from a
-  // caller-derived path. The codeRoot argument is the validated runtime root.
-  const resolved = codeRoot ?? process.env.LAOS_CORE_ROOT;
-  if (!resolved) throw new Error("LAOS_CORE_ROOT is not set");
-  const cli = path.join(resolved, "src", "laos.py");
-  return cli;
-}
-
 // Exported so the env-publisher can invoke the Core CLI for the fd-rooted
 // vault.read task (S8/GP3-01) through the same restricted task interface.
-// GP7-04: the child is bounded (timeout + output cap) so a hung or chatty Core
-// child (e.g. a FIFO the O_NONBLOCK guard missed) cannot block the Bridge
-// forever or exhaust memory. runCli is also where the verified childEnv is
-// applied — the caller passes the frozen root, never a dynamic value.
-export function runCli(env, taskJson, codeRoot, options = {}) {
-  return new Promise((resolve, reject) => {
-    const cli = findCli(codeRoot);
-    const args = [
-      cli,
-      "--root", env.LAOS_DATA_ROOT,
-      "--state-dir", env.LAOS_STATE_DIR,
-      "--task-json", taskJson,
-    ];
-    const timeoutMs = options.timeoutMs ?? RUNCLI_TIMEOUT_MS;
-    const child = spawn(env.LAOS_PYTHON_EXECUTABLE || "python3", args, {
-      cwd: path.dirname(cli),
-      env: { ...process.env, ...env, PYTHONUTF8: "1" },
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const stdout = [];
-    const stderr = [];
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let timedOut = false;
-    let outputLimitExceeded = false;
-    let settled = false;
-    let timer;
+// This legacy export remains for callers that import it directly, but it has
+// no independent spawn path: explicit bindings construct a TrustedCoreRunner
+// and therefore inherit its verified environment and process-tree lifecycle.
+export async function runCli(env, taskJson, codeRoot, options = {}) {
+  if (!env || typeof env !== "object" || Array.isArray(env)) {
+    throw new Error("legacy LAOS CLI requires an environment object");
+  }
+  if (!options || typeof options !== "object" || Array.isArray(options)
+    || !Object.hasOwn(options, "workspace") || !Object.hasOwn(options, "cwd")) {
+    throw new Error("legacy LAOS CLI requires explicit workspace and immutable Core cwd bindings");
+  }
 
-    const finish = (error, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (error) reject(error);
-      else resolve(value);
-    };
-    const collect = (target, chunk, isStdout) => {
-      // Always push so the pipe keeps draining (a blocked child would never
-      // emit more chunks and the cap would never trip). Track the byte count
-      // separately; once it exceeds the cap we kill and reject.
-      if (isStdout) stdoutBytes += chunk.length;
-      else stderrBytes += chunk.length;
-      if (stdoutBytes > RUNCLI_MAX_OUTPUT_BYTES || stderrBytes > RUNCLI_MAX_OUTPUT_BYTES) {
-        outputLimitExceeded = true;
-        child.kill("SIGKILL");
-      }
-      target.push(chunk);
-    };
-
-    child.stdout.on("data", (chunk) => collect(stdout, chunk, true));
-    child.stderr.on("data", (chunk) => collect(stderr, chunk, false));
-    child.once("error", (error) => finish(error));
-    child.once("close", (code) => {
-      if (outputLimitExceeded) {
-        finish(new Error("LAOS CLI output limit exceeded"));
-        return;
-      }
-      if (timedOut) {
-        finish(new Error("LAOS CLI timed out"));
-        return;
-      }
-      if (code !== 0) {
-        finish(new Error(`LAOS CLI exited ${code}: ${Buffer.concat(stderr).toString("utf8").slice(0, 400)}`));
-        return;
-      }
-      finish(null, Buffer.concat(stdout).toString("utf8"));
-    });
-
-    timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
-    }, timeoutMs);
-    timer.unref();
-  });
+  const runner = await createCoreRunner({ env, codeRoot: options.workspace });
+  if (codeRoot !== undefined && codeRoot !== runner.coreRoot) {
+    throw new Error("legacy LAOS CLI Core root conflicts with the TrustedCoreRunner root");
+  }
+  const execution = {
+    workspace: options.workspace,
+    cwd: options.cwd,
+  };
+  if (Object.hasOwn(options, "timeoutMs")) execution.timeoutMs = options.timeoutMs;
+  if (Object.hasOwn(options, "extraEnv")) execution.extraEnv = options.extraEnv;
+  return runner.runCli(taskJson, execution);
 }
 
 /**
@@ -148,6 +84,9 @@ export function buildLaosEvidencePublisher(options = {}) {
     throw new Error("LAOS evidence publisher Core cwd must match the TrustedCoreRunner root");
   }
   const run = runner.runCli.bind(runner);
+  // The TrustedCoreRunner owns the restricted --task-json CLI invocation after
+  // this unified normalization boundary; this module never opens a second
+  // spawn path for evidence publication.
   const profileEnv = env ?? process.env;
   return async (input) => {
     const { task, expectedIdentity } = normalizeEvidenceIngress(

@@ -111,7 +111,14 @@ export async function buildEnvVaultPublisher(env, { coreRoot, codeRoot, runner }
   const publish = async (evidenceInput, execution) => {
     const { buildLaosEvidencePublisher } = await import("./laos-publisher.js");
     const publisher = buildLaosEvidencePublisher({
-      env: childEnv,
+      // This is not caller-controlled scope: evidenceInput is assembled below
+      // from resolvePartition + verifyScope.  The normalizer must receive the
+      // same verified source classification that will be persisted, while the
+      // original profile ceiling has already authorized it in verifyScope.
+      env: {
+        ...childEnv,
+        LAOS_CHECKPOINT_CONFIDENTIALITY: evidenceInput.confidentiality,
+      },
       workspace: execution.workspace,
       cwd: execution.cwd,
       runner,
@@ -180,17 +187,15 @@ export async function buildEnvVaultPublisher(env, { coreRoot, codeRoot, runner }
     const confirmed = verifyScope(partition, profile);
     const { identity, input: snapshotInput } = buildCanonicalNoteSnapshot(raw, noteRelativePath, partition);
 
-    // GP10-08: the evidence input carries the PROFILE's ceiling (authorization
-    // upper bound), NOT the note's actual confidentiality. A note classified at
-    // "public" published under an "internal" profile must carry "internal" scope
-    // so the evidence normalizer's exact-scope gate does not reject it as
-    // scope_mismatch (the profile ceiling is what the caller is authorized to
-    // see; the note's actual classification is metadata, not an authority claim).
+    // GP10-08: the profile ceiling remains an authorization upper-bound check
+    // in verifyScope, but Core must persist the note's actual verified
+    // classification. The returned partition and persisted evidence request
+    // therefore carry the same confidentiality value.
     const evidenceInput = {
       ...snapshotInput,
       workspace: confirmed.workspace,
       project: confirmed.project,
-      confidentiality: profile.confidentiality_ceiling,
+      confidentiality: confirmed.confidentiality,
     };
     const coreResult = await publish(evidenceInput, runOptions);
     return {
