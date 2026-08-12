@@ -10,15 +10,19 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: developer-bridge
     steps:
       - uses: actions/checkout@v4
         with:
+          path: developer-bridge
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: l1871276598-dotcom/research-agent-memory
-          ref: 4b85bc27f51d8d1a24cf1991ca4f1346379a294a
-          path: .laos-core
+          ref: 80936bd5af9d0960293b6505443b6d3486068989
+          path: laos-core
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -30,5 +34,5 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm test
         env:
-          LAOS_TEST_CORE_ROOT: ${{ github.workspace }}/.laos-core
+          LAOS_TEST_CORE_ROOT: ${{ github.workspace }}/laos-core
           LAOS_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
