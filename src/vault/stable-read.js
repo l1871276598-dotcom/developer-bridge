@@ -106,6 +106,9 @@ export async function readStableVaultNote(root, noteRelativePath, options = {}) 
     if (!before.isFile()) {
       fail("note_not_file", "note must be a regular file");
     }
+    if (before.nlink !== 1n) {
+      fail("note_not_file", "note must be a single-link regular file");
+    }
     if (before.size > BigInt(MAX_NOTE_BYTES)) {
       fail("note_too_large", "note exceeds the size limit");
     }

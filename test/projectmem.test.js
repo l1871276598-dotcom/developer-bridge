@@ -14,7 +14,11 @@ import {
   manifestSha256,
   PROJECTMEM_MANIFEST_SCHEMA,
 } from "../src/projectmem/manifest.js";
-import { initProjectmem, PROJECTMEM_SUMMARY_SCHEMA } from "../src/projectmem/index.js";
+import {
+  initProjectmem,
+  PROJECTMEM_SUMMARY_SCHEMA,
+  reconcileManifestWithProfile,
+} from "../src/projectmem/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -190,6 +194,148 @@ test("F-07: reconcileManifestWithProfile rejects a manifest that disagrees with 
     ),
     (e) => e.code === "projectmem_binding_conflict",
   );
+});
+
+test("GP12-05/GP10-10: projectmem accepts only exact own-data schemas and own rank names", () => {
+  const body = buildManifestBody(DEFAULT_MANIFEST_ARGS);
+  const manifest = finalizeManifest(body);
+  const profile = {
+    workspace: "personal",
+    project: "laos",
+    confidentiality_ceiling: "internal",
+  };
+
+  // The two permitted ordinary-record forms remain accepted.
+  assert.doesNotThrow(() => validateManifest(manifest));
+  assert.doesNotThrow(() => validateManifest(Object.assign(Object.create(null), manifest)));
+  assert.doesNotThrow(() => reconcileManifestWithProfile(manifest, profile));
+  assert.doesNotThrow(() => reconcileManifestWithProfile(
+    manifest,
+    Object.assign(Object.create(null), profile),
+  ));
+
+  const missingBody = { ...body };
+  delete missingBody.component;
+  const missingManifest = finalizeManifest(missingBody);
+  const inheritedManifest = finalizeManifest(missingBody);
+  Object.setPrototypeOf(inheritedManifest, { component: body.component });
+  const extraManifest = finalizeManifest({ ...body, forged: true });
+  let manifestAccessorReads = 0;
+  const accessorManifest = finalizeManifest(body);
+  Object.defineProperty(accessorManifest, "component", {
+    enumerable: true,
+    get() {
+      manifestAccessorReads += 1;
+      return body.component;
+    },
+  });
+  const classManifest = Object.assign(new (class ManifestRecord {})(), manifest);
+  const proxyManifest = new Proxy(finalizeManifest(body), {});
+  const arrayManifest = Object.assign([], manifest);
+
+  for (const [label, candidate] of [
+    ["missing field", missingManifest],
+    ["inherited field", inheritedManifest],
+    ["extra field", extraManifest],
+    ["accessor field", accessorManifest],
+    ["class instance", classManifest],
+    ["proxy", proxyManifest],
+    ["array", arrayManifest],
+  ]) {
+    assert.throws(() => validateManifest(candidate), (e) => e?.code === "invalid_manifest", label);
+  }
+  assert.equal(manifestAccessorReads, 0, "manifest accessors must not run during validation");
+
+  const constructorPolicy = finalizeManifest({
+    ...body,
+    write_policy: { ...body.write_policy, constructor: true },
+  });
+  const inheritedPolicy = { ...body.write_policy };
+  delete inheritedPolicy.memory_create;
+  Object.setPrototypeOf(inheritedPolicy, { memory_create: true });
+  const inheritedPolicyManifest = finalizeManifest({ ...body, write_policy: inheritedPolicy });
+  let policyAccessorReads = 0;
+  const accessorPolicy = { ...body.write_policy };
+  Object.defineProperty(accessorPolicy, "memory_create", {
+    enumerable: true,
+    get() {
+      policyAccessorReads += 1;
+      return true;
+    },
+  });
+  const accessorPolicyManifest = finalizeManifest({ ...body, write_policy: accessorPolicy });
+  policyAccessorReads = 0;
+  const classPolicyManifest = finalizeManifest({
+    ...body,
+    write_policy: Object.assign(new (class WritePolicyRecord {})(), body.write_policy),
+  });
+  const proxyPolicyManifest = finalizeManifest({
+    ...body,
+    write_policy: new Proxy({ ...body.write_policy }, {}),
+  });
+  const arrayPolicyManifest = finalizeManifest({
+    ...body,
+    write_policy: Object.assign([], body.write_policy),
+  });
+
+  for (const [label, candidate] of [
+    ["prototype-name policy key", constructorPolicy],
+    ["inherited policy field", inheritedPolicyManifest],
+    ["accessor policy field", accessorPolicyManifest],
+    ["policy class instance", classPolicyManifest],
+    ["policy proxy", proxyPolicyManifest],
+    ["policy array", arrayPolicyManifest],
+  ]) {
+    assert.throws(() => validateManifest(candidate), (e) => e?.code === "invalid_manifest", label);
+  }
+  assert.equal(policyAccessorReads, 0, "write_policy accessors must not run during validation");
+
+  const profileMissing = { workspace: "personal", project: "laos" };
+  const inheritedProfile = Object.create({ confidentiality_ceiling: "internal" });
+  inheritedProfile.workspace = "personal";
+  inheritedProfile.project = "laos";
+  const extraProfile = { ...profile, forged: true };
+  let profileAccessorReads = 0;
+  const accessorProfile = { ...profile };
+  Object.defineProperty(accessorProfile, "confidentiality_ceiling", {
+    enumerable: true,
+    get() {
+      profileAccessorReads += 1;
+      return "internal";
+    },
+  });
+  const classProfile = Object.assign(new (class ProfileRecord {})(), profile);
+  const proxyProfile = new Proxy({ ...profile }, {});
+
+  for (const [label, candidate] of [
+    ["missing profile field", profileMissing],
+    ["inherited profile field", inheritedProfile],
+    ["extra profile field", extraProfile],
+    ["accessor profile field", accessorProfile],
+    ["profile class instance", classProfile],
+    ["profile proxy", proxyProfile],
+  ]) {
+    assert.throws(
+      () => reconcileManifestWithProfile(manifest, candidate),
+      (e) => e?.code === "projectmem_invalid_profile",
+      label,
+    );
+  }
+  assert.equal(profileAccessorReads, 0, "profile accessors must not run during validation");
+
+  for (const rankName of ["constructor", "toString", "__proto__", "__defineGetter__", "valueOf"]) {
+    const manifestWithPrototypeRank = finalizeManifest({ ...body, confidentiality_ceiling: rankName });
+    assert.throws(
+      () => reconcileManifestWithProfile(manifestWithPrototypeRank, profile),
+      (e) => e?.code === "invalid_manifest",
+      `manifest rank ${rankName}`,
+    );
+    assert.throws(
+      () => reconcileManifestWithProfile(manifest, { ...profile, confidentiality_ceiling: rankName }),
+      (e) => e?.code === "projectmem_invalid_profile",
+      `profile rank ${rankName}`,
+    );
+  }
 });
 
 test("summaries are gitignored but manifest is tracked", async (t) => {

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { isProxy } from "node:util/types";
 
 import {
   buildManifestBody,
@@ -47,6 +48,58 @@ function sha256Hex(value) {
 }
 
 const BINDING_STATES = Object.freeze(["derived", "refreshed", "stale", "invalid"]);
+const PROFILE_KEYS = ["workspace", "project", "confidentiality_ceiling"];
+const CONFIDENTIALITY_RANK = Object.freeze(Object.assign(Object.create(null), {
+  public: 0,
+  personal: 1,
+  internal: 2,
+  restricted: 3,
+}));
+
+function exactOwnDataRecord(value, expectedKeys) {
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value) || isProxy(value)) {
+      return null;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== expectedKeys.length || !expectedKeys.every((key) => Object.hasOwn(value, key))) {
+      return null;
+    }
+
+    const fields = Object.create(null);
+    for (const key of expectedKeys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !Object.hasOwn(descriptor, "value") || !descriptor.enumerable) return null;
+      fields[key] = descriptor.value;
+    }
+    return fields;
+  } catch {
+    return null;
+  }
+}
+
+function validateTrustedProfile(profile) {
+  const fields = exactOwnDataRecord(profile, PROFILE_KEYS);
+  if (fields === null) {
+    fail("projectmem_invalid_profile", "Bridge profile must be an exact plain scope record");
+  }
+  if (fields.workspace !== "personal" && fields.workspace !== "work") {
+    fail("projectmem_invalid_profile", "profile workspace is invalid");
+  }
+  if (typeof fields.project !== "string" || fields.project.length === 0) {
+    fail("projectmem_invalid_profile", "profile project is invalid");
+  }
+  if (
+    typeof fields.confidentiality_ceiling !== "string"
+    || !Object.hasOwn(CONFIDENTIALITY_RANK, fields.confidentiality_ceiling)
+  ) {
+    fail("projectmem_invalid_profile", "profile confidentiality ceiling is invalid");
+  }
+  return fields;
+}
 
 async function safeProjectmemDir(repoRoot) {
   const target = path.join(repoRoot, ".projectmem");
@@ -117,27 +170,22 @@ export function buildSummary(manifest, {
  * manifest scope disagrees with the profile.
  */
 export function reconcileManifestWithProfile(manifest, profile) {
-  if (!profile || typeof profile !== "object") {
-    fail("projectmem_invalid_profile", "Bridge profile is not configured");
+  const validatedManifest = validateManifest(manifest);
+  const { workspace, project, confidentiality_ceiling: ceiling } = validateTrustedProfile(profile);
+  const manifestCeiling = validatedManifest.confidentiality_ceiling;
+  if (typeof manifestCeiling !== "string" || !Object.hasOwn(CONFIDENTIALITY_RANK, manifestCeiling)) {
+    fail("projectmem_binding_conflict", "manifest confidentiality ceiling is invalid");
   }
-  const { workspace, project, confidentiality_ceiling: ceiling } = profile;
-  if (workspace !== "personal" && workspace !== "work") {
-    fail("projectmem_invalid_profile", "profile workspace is invalid");
-  }
-  if (typeof project !== "string" || project.length === 0) {
-    fail("projectmem_invalid_profile", "profile project is invalid");
-  }
-  const rank = { public: 0, personal: 1, internal: 2, restricted: 3 };
-  if (manifest.workspace !== workspace) {
+  if (validatedManifest.workspace !== workspace) {
     fail("projectmem_binding_conflict", "manifest workspace does not match the Bridge profile");
   }
-  if (manifest.project !== project) {
+  if (validatedManifest.project !== project) {
     fail("projectmem_binding_conflict", "manifest project does not match the Bridge profile");
   }
-  if (rank[manifest.confidentiality_ceiling] > rank[ceiling ?? "internal"]) {
+  if (CONFIDENTIALITY_RANK[manifestCeiling] > CONFIDENTIALITY_RANK[ceiling]) {
     fail("projectmem_binding_conflict", "manifest confidentiality exceeds the Bridge profile ceiling");
   }
-  return manifest;
+  return validatedManifest;
 }
 
 /**

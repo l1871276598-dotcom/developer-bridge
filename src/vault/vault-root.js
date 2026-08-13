@@ -130,5 +130,8 @@ export async function resolveNotePath(root, notePath) {
   if (!fileStat.isFile()) {
     fail("note_not_file", "note path must identify a regular file");
   }
+  if (fileStat.nlink !== 1n) {
+    fail("note_not_file", "note path must identify a single-link regular file");
+  }
   return { absolute, relative, fileStat };
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import { readNoteIdentity, buildNoteIdentity } from "../src/vault/note-identity.
 import { buildSnapshotFromRaw } from "../src/vault/snapshot.js";
 import { readStableVaultNote } from "../src/vault/stable-read.js";
 import { publishNote } from "../src/vault/vault-evidence.js";
+import { resolveNotePath } from "../src/vault/vault-root.js";
 
 const PROFILE = Object.freeze({
   workspace: "personal",
@@ -218,3 +219,34 @@ test("S8: new file created over the validated path (same size) is detected via c
   );
 });
 
+test("GP10-05: resolveNotePath rejects hard-linked targets while single-link notes remain readable", async (t) => {
+  const { vault } = await vaultFixture(t);
+  const notePath = "01-Projects/LAOS/design.md";
+  const note = path.join(vault, notePath);
+  await writeFile(note, NOTE_A);
+
+  const resolved = await resolveNotePath(vault, notePath);
+  assert.equal(resolved.fileStat.nlink, 1n);
+  assert.equal((await readStableVaultNote(vault, notePath)).raw, NOTE_A);
+
+  await link(note, path.join(vault, "01-Projects", "LAOS", "design-alias.md"));
+  await assert.rejects(
+    resolveNotePath(vault, notePath),
+    (e) => e.code === "note_not_file",
+  );
+});
+
+test("GP10-05: the opened descriptor independently rejects a resolve-to-open hard-link race", async (t) => {
+  const { vault } = await vaultFixture(t);
+  const notePath = "01-Projects/LAOS/design.md";
+  await writeFile(path.join(vault, notePath), NOTE_A);
+
+  await assert.rejects(
+    readStableVaultNote(vault, notePath, {
+      afterResolve: async (absolute) => {
+        await link(absolute, path.join(vault, "01-Projects", "LAOS", "design-race-alias.md"));
+      },
+    }),
+    (e) => e.code === "note_not_file",
+  );
+});
