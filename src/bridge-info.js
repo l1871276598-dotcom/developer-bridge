@@ -1,0 +1,90 @@
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { promisify } from "node:util";
+
+import { canonicalJson, FROZEN_LAOS_TASKS } from "./laos-memory-tool.js";
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Read-only build identity for the Developer Bridge (C-INV-19 / deployment
+ * parity). Lets a red team prove the audited source tree is what is running.
+ *
+ * This is diagnostics only: it never routes through memory.*, never produces a
+ * side effect, and is NOT part of the task authority surface.
+ */
+
+export const LAOS_BRIDGE_INFO_DEFINITION = Object.freeze({
+  name: "laos_bridge_info",
+  description:
+    "Read-only Developer Bridge build identity: git commit/tree, dirty flag, " +
+    "allowlist digest, protocol version, and the connected Core commit. " +
+    "Proves the audited source matches the deployed runtime.",
+  inputSchema: {
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  },
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+});
+
+function sha256Hex(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+// GP5-02/R15: git status by default refreshes the index (writes back cached
+// stat info), so laos_bridge_info would have a side effect. --no-optional-locks
+// suppresses that write, keeping bridge_info strictly read-only. rev-parse is
+// inherently read-only.
+async function gitAt(cwd, ...args) {
+  const gitArgs = args[0] === "status" ? ["--no-optional-locks", ...args] : args;
+  try {
+    const { stdout } = await execFileAsync("git", gitArgs, { cwd, timeout: 10_000 });
+    return stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+export async function buildBridgeInfo({ bridgeRoot, codeRoot, env, allowlist = FROZEN_LAOS_TASKS } = {}) {
+  const dirty = await gitAt(bridgeRoot, "status", "--porcelain");
+  const commit = await gitAt(bridgeRoot, "rev-parse", "HEAD");
+  const tree = await gitAt(bridgeRoot, "rev-parse", "HEAD^{tree}");
+  const coreCommit = await gitAt(codeRoot, "rev-parse", "HEAD");
+
+  // Runtime allowlist canonical digest — a red team compares this against the
+  // reviewed allowlist (plan §54). The allowlist CONTENTS are included so an
+  // auditor can recompute the digest independently (S13): sort the task names,
+  // canonical-JSON serialize {tasks:[...]}, SHA-256.
+  const allowlistArray = [...allowlist].sort();
+  const allowlistSha = sha256Hex(canonicalJson({ tasks: allowlistArray }));
+
+  return {
+    schema_version: 1,
+    bridge: {
+      git_commit: commit ?? "unavailable",
+      git_tree: tree ?? "unavailable",
+      dirty: dirty !== null && dirty.length > 0,
+      allowlist: allowlistArray,
+      allowlist_sha256: allowlistSha,
+      protocol_version: "laos-task-v2",
+    },
+    core: {
+      git_commit: coreCommit ?? "unavailable",
+      protocol_version: "evidence-v2",
+    },
+    governance: {
+      constitution_version: "1.0",
+    },
+  };
+}
+
+export function createBridgeInfoTool(bridgeRoot, codeRoot, env) {
+  return Object.freeze({
+    definition: LAOS_BRIDGE_INFO_DEFINITION,
+    async call() {
+      const info = await buildBridgeInfo({ bridgeRoot, codeRoot, env });
+      return { text: JSON.stringify(info, null, 2) };
+    },
+  });
+}
