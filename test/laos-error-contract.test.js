@@ -10,6 +10,10 @@ import { createBridgeWithSyncTools } from "../src/bridge-with-sync-tools.js";
 
 const execFileAsync = promisify(execFile);
 const operatorIdentity = Object.freeze({ id: "laos.error.test", type: "local-human" });
+const PYTHON_EXECUTABLE = (
+  typeof process.env.LAOS_PYTHON_EXECUTABLE === "string" &&
+  path.isAbsolute(process.env.LAOS_PYTHON_EXECUTABLE)
+) ? process.env.LAOS_PYTHON_EXECUTABLE : process.execPath;
 
 async function git(cwd, ...args) {
   return execFileAsync("git", args, { cwd });
@@ -18,19 +22,21 @@ async function git(cwd, ...args) {
 async function fixture(t) {
   const base = await realpath(await mkdtemp(path.join(os.tmpdir(), "developer-bridge-laos-error-")));
   const workspace = path.join(base, "workspace");
+  const coreRoot = path.join(base, "core-runtime");
   const dataRoot = path.join(base, "data");
   const stateDir = path.join(base, "state");
-  await Promise.all([mkdir(workspace), mkdir(dataRoot), mkdir(stateDir)]);
+  await Promise.all([mkdir(workspace), mkdir(coreRoot), mkdir(dataRoot), mkdir(stateDir)]);
   await writeFile(path.join(dataRoot, ".research-agent-root"), "{}\n", "utf8");
-  await mkdir(path.join(workspace, "src"));
-  await writeFile(path.join(workspace, "src", "laos.py"), "print('fixture')\n", "utf8");
+  await mkdir(path.join(coreRoot, "src"));
+  await writeFile(path.join(coreRoot, "src", "laos.py"), "print('fixture')\n", "utf8");
   await git(workspace, "init", "--quiet", "-b", "feat/laos-errors");
   await git(workspace, "config", "user.name", "Test User");
   await git(workspace, "config", "user.email", "test@example.invalid");
-  await git(workspace, "add", "src/laos.py");
+  await writeFile(path.join(workspace, "context.txt"), "fixture\n", "utf8");
+  await git(workspace, "add", "context.txt");
   await git(workspace, "commit", "--quiet", "-m", "fixture");
   t.after(() => rm(base, { recursive: true, force: true }));
-  return { workspace, dataRoot, stateDir };
+  return { workspace, coreRoot, dataRoot, stateDir };
 }
 
 function env(item) {
@@ -38,8 +44,15 @@ function env(item) {
     PATH: process.env.PATH,
     HOME: process.env.HOME,
     DEVELOPER_BRIDGE_CAPABILITY_PROFILE: "controlled-engineering-v1",
+    LAOS_CORE_ROOT: item.coreRoot,
     LAOS_DATA_ROOT: item.dataRoot,
     LAOS_STATE_DIR: item.stateDir,
+    LAOS_PYTHON_EXECUTABLE: PYTHON_EXECUTABLE,
+    // Trusted Bridge profile scope (C-INV-13). LAOS tasks are fail-closed
+    // without it, so tests that reach Core must pin the profile.
+    LAOS_CHECKPOINT_WORKSPACE: "personal",
+    LAOS_CHECKPOINT_PROJECT: "laos",
+    LAOS_CHECKPOINT_CONFIDENTIALITY: "personal",
   };
 }
 

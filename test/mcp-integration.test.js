@@ -19,6 +19,9 @@ const execFileAsync = promisify(execFile);
 const OPERATOR_ID = "integration.operator";
 const APPROVED_TOOLS = [
   ...REQUIRED_TOOL_NAMES,
+  // Always-present read-only build identity (C-INV-19), placed immediately
+  // after the base tool set (before the conditional LAOS/structured tools).
+  "laos_bridge_info",
   ...STRUCTURED_GIT_TOOL_DEFINITIONS.map(({ name }) => name),
 ];
 const CAPABILITY_PROFILE = "controlled-engineering-v1";

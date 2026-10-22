@@ -28,6 +28,7 @@ import {
 } from "./git-sync-tools.js";
 import { createLaosCheckpointTools } from "./laos-checkpoint-tools.js";
 import { LaosMemoryToolError, createLaosMemoryTool } from "./laos-memory-tool.js";
+import { createBridgeInfoTool } from "./bridge-info.js";
 import { createStructuredGitTools } from "./structured-git-tools.js";
 import { createWorkspaceContext } from "./workspace-context.js";
 
@@ -93,6 +94,7 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
   const baseLogger = logger ?? ((line) => console.error(line));
   const auditLogger = createOperatorAuditLogger(baseLogger, options.operatorIdentity);
   const env = options.env ?? process.env;
+  const runtimeRoot = path.resolve(import.meta.dirname, "..");
   const workspaceContext = await createWorkspaceContext(workspace, {
     managedRoot: env.DEVELOPER_BRIDGE_WORKTREE_ROOT,
   });
@@ -110,11 +112,19 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
   const structuredGitTools = createStructuredGitTools(workspaceContext);
   const laosMemoryTool = await createLaosMemoryTool(env, () => activeRoot, {
     runCommand: options.laosRunCommand,
+    vaultPublish: options.vaultPublish,
   });
   const laosCheckpointTools = await createLaosCheckpointTools(env, identity.root, {
     runCommand: options.laosCheckpointRunCommand,
   });
+  // Read-only build identity (C-INV-19): proves the audited source matches the
+  // deployed runtime. Never part of the task authority surface. Placed before
+  // the conditional LAOS tools so the always-present tool set is a stable
+  // prefix regardless of LAOS configuration.
+  const bridgeInfoTool = options.bridgeInfoTool
+    ?? createBridgeInfoTool(runtimeRoot, identity.root, env);
   const optionalTools = [
+    bridgeInfoTool.definition,
     ...structuredGitTools.definitions,
     ...(laosMemoryTool ? [laosMemoryTool.definition] : []),
     ...(laosCheckpointTools ? laosCheckpointTools.definitions : []),
@@ -188,6 +198,18 @@ export async function createBridgeWithSyncTools(workspace, logger, options = {})
           } catch (error) {
             auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
             return laosFailureResult(error);
+          }
+        }
+
+        if (name === bridgeInfoTool.definition.name) {
+          const started = Date.now();
+          try {
+            const result = await bridgeInfoTool.call(args);
+            auditLogger(`${new Date().toISOString()} tool=${name} result=success duration_ms=${Date.now() - started}`);
+            return textResult(result.text);
+          } catch (error) {
+            auditLogger(`${new Date().toISOString()} tool=${name} result=failure duration_ms=${Date.now() - started}`);
+            return failureResult();
           }
         }
 

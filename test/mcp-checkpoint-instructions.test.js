@@ -34,15 +34,16 @@ async function fixture(t) {
     await mkdtemp(path.join(os.homedir(), ".developer-bridge-mcp-checkpoint-")),
   );
   const workspace = path.join(base, "workspace");
+  const coreRoot = path.join(base, "core-runtime");
   const dataRoot = path.join(base, "data");
   const stateDir = path.join(base, "state");
   await Promise.all([
-    mkdir(path.join(workspace, "src"), { recursive: true }),
+    mkdir(path.join(coreRoot, "src"), { recursive: true }),
     mkdir(path.join(workspace, "tools"), { recursive: true }),
     mkdir(dataRoot),
     mkdir(stateDir),
   ]);
-  await writeFile(path.join(workspace, "src", "laos.py"), "print('fixture')\n", "utf8");
+  await writeFile(path.join(coreRoot, "src", "laos.py"), "print('fixture')\n", "utf8");
   await writeFile(
     path.join(workspace, "tools", "developer_bridge_adapter.py"),
     "# fixture\n",
@@ -60,7 +61,7 @@ async function fixture(t) {
   await execFileAsync("git", ["add", "."], { cwd: workspace });
   await execFileAsync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: workspace });
   t.after(() => rm(base, { recursive: true, force: true }));
-  return { base, workspace, dataRoot, stateDir };
+  return { base, workspace, coreRoot, dataRoot, stateDir };
 }
 
 function environment(item, overrides = {}) {
@@ -69,6 +70,7 @@ function environment(item, overrides = {}) {
     DEVELOPER_BRIDGE_OPERATOR_ID: "checkpoint.integration",
     DEVELOPER_BRIDGE_WORKSPACE: item.workspace,
     DEVELOPER_BRIDGE_CAPABILITY_PROFILE: "controlled-engineering-v1",
+    LAOS_CORE_ROOT: item.coreRoot,
     LAOS_DATA_ROOT: item.dataRoot,
     LAOS_STATE_DIR: item.stateDir,
     LAOS_ENABLE_CHECKPOINT_CAPTURE: "1",
