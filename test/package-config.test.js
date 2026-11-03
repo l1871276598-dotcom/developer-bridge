@@ -82,15 +82,16 @@ test("README documents the supported setup, connection, tools, and safety bounda
 
   for (const expected of [
     /Developer Bridge/u,
-    /ChatGPT Web\/App[\s\S]*HTTPS tunnel[\s\S]*Streamable HTTP MCP[\s\S]*authorized local workspace/u,
+    /ChatGPT Web\/App[\s\S]*OpenAI Secure MCP Tunnel[\s\S]*Streamable HTTP MCP[\s\S]*authorized local workspace/u,
     /npm install/u,
     /export DEVELOPER_BRIDGE_WORKSPACE="\.\.\."/u,
     /export MCP_PATH="mcp-\.\.\."/u,
     /npm start/u,
-    /ngrok http 3000/u,
+    /OpenAI Secure MCP Tunnel/iu,
+    /tunnel-client run --profile/u,
     /MCP_PATH[^\n]*(?:path|路径)[^\n]*(?:not|不要|不得)[^\n]*(?:URL|网址)/iu,
     /(?:do not|不要|不得)[^\n]*(?:commit|提交)[^\n]*(?:secret|秘密|路径)/iu,
-    /(?:do not|不要|不得)[^\n]*(?:hard.?code|硬编码)[^\n]*ngrok/iu,
+    /(?:do not|不要|不得)[^\n]*(?:hard.?code|硬编码)[^\n]*(?:tunnel|隧道)/iu,
     /(?:stop|关闭)[^\n]*(?:service|服务)/iu,
     /(?:single project|单个项目)/iu,
     /list_files/u,
@@ -124,7 +125,7 @@ test("README documents the supported setup, connection, tools, and safety bounda
     /(?:no|无)[^\n]*(?:arbitrary Git|任意 Git)/iu,
     /(?:no|无)[^\n]*(?:arbitrary.*gh|任意.*gh)/iu,
     /(?:no|无)[^\n]*(?:detached|分离)/iu,
-    /https:\/\/<ngrok-domain>\/<MCP_PATH>/u,
+    /http:\/\/127\.0\.0\.1:3000\/<MCP_PATH>/u,
   ]) {
     assert.match(readme, expected);
   }
@@ -132,5 +133,6 @@ test("README documents the supported setup, connection, tools, and safety bounda
   assert.doesNotMatch(readme, /\/Users\//u);
   assert.doesNotMatch(readme, /https:\/\/[^<\s]+\/(?:mcp[-_][A-Za-z0-9._~-]+)/u);
   assert.doesNotMatch(readme, /ngrok-(?:free\.)?(?:app|io)/iu);
+  assert.doesNotMatch(readme, /ngrok http/iu);
   assert.doesNotMatch(readme, /bridge\.js/u);
 });

@@ -1,5 +1,7 @@
 # LAOS Native Checkpoint Tools Design
 
+> **Historical:** The 3000/3001 dual-bridge and ngrok transport were retired on 2026-08-06. Current transport is OpenAI Secure MCP Tunnel → single Developer Bridge on port 3000 → the authorized workspace. Do not recreate the dual-bridge transport from this document.
+
 ## Objective
 
 Expose `laos_capture_checkpoint`, `laos_session_search`, and `laos_session_get` through the existing Developer Bridge endpoint used by ChatGPT while preserving every current Developer Bridge tool, `laos_memory_task`, Git authorization, audit serialization, and LAOS persistence semantics.

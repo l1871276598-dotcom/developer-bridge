@@ -1,5 +1,7 @@
 # LAOS Native Checkpoint Tools Implementation Plan
 
+> **Historical:** The 3000/3001 dual-bridge and ngrok transport were retired on 2026-08-06. Current transport is OpenAI Secure MCP Tunnel → single Developer Bridge on port 3000 → the authorized workspace. Do not recreate the dual-bridge transport from this document.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Expose three scope-safe native LAOS checkpoint/session tools on the real Developer Bridge endpoint and prove persistence across a fresh MCP connection.
